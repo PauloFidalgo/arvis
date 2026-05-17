@@ -1,0 +1,63 @@
+# Fast pass-specific Docker image — only rebuilds GCC stage2.
+#
+# Requires riscv-gcc-prebuilt (binutils + newlib + GCC stage1 pre-built).
+# Only copies custom-fused.md and rebuilds GCC stage2 (~60-120s vs ~650s).
+#
+# Usage:
+#   docker build -f tools/Dockerfile.gcc-fast \
+#     --build-arg CUSTOM_FUSED_MD=output/kyber_specialized/custom-fused.md \
+#     -t custom-riscv-gcc .
+#
+# First time: build prebuilt image once
+#   docker build -f tools/Dockerfile.gcc-prebuilt -t riscv-gcc-prebuilt tools/
+#
+# Speedup: ~5x faster per pass (120s vs 650s)
+
+FROM riscv-gcc-prebuilt
+
+ARG CUSTOM_FUSED_MD=output/kyber_specialized/custom-fused.md
+ARG PATCHED_RISCV_MD=tools/riscv-md-noop.txt
+
+# Copy the pass-specific patterns file
+COPY ${CUSTOM_FUSED_MD} /toolchain/gcc/gcc/config/riscv/custom-fused.md
+
+# Optionally replace riscv.md with a pre-patched version
+COPY ${PATCHED_RISCV_MD} /tmp/riscv_md_candidate
+RUN if [ $(wc -c < /tmp/riscv_md_candidate) -gt 10000 ] && grep -q '(define_insn' /tmp/riscv_md_candidate; then \
+        echo "Installing patched riscv.md ($(wc -c < /tmp/riscv_md_candidate) bytes, builtin overrides enabled)"; \
+        cp /tmp/riscv_md_candidate /toolchain/gcc/gcc/config/riscv/riscv.md; \
+    else \
+        echo "No patched riscv.md (noop file or invalid content — skipping)"; \
+    fi && rm -f /tmp/riscv_md_candidate
+
+# Touch the .md so Make knows GCC source changed and triggers stage2 rebuild.
+# The riscv-gnu-toolchain Makefile uses $(GCC_SRCDIR) as a dependency —
+# touching any file in gcc/ invalidates the gcc build stamps.
+RUN touch /toolchain/gcc/gcc/config/riscv/custom-fused.md && \
+    rm -f stamps/build-gcc-newlib-stage2
+
+# Rebuild ONLY GCC stage2 (custom-fused.md patterns are compiled here).
+# Binutils and newlib are already installed — no rebuild needed.
+# ENABLED_LANGUAGES=c — only C compiler, no C++/Fortran
+RUN make -j$(nproc) ENABLED_LANGUAGES=c stamps/build-gcc-newlib-stage2
+
+# Build GIMPLE fusion plugin
+COPY tools/gcc-plugin/fused_pass.c /toolchain/fused_pass.c
+RUN mkdir -p /opt/riscv/lib/gcc-plugin && \
+    GCC_PLUGIN_DIR=$(/opt/riscv/bin/riscv32-unknown-elf-gcc -print-file-name=plugin) && \
+    g++ -shared -fPIC -fno-rtti \
+        -I${GCC_PLUGIN_DIR}/include \
+        -o /opt/riscv/lib/gcc-plugin/fused_pass.so \
+        /toolchain/fused_pass.c && \
+    test -f /opt/riscv/lib/gcc-plugin/fused_pass.so
+
+# Smoke test
+RUN echo 'int f(int x){return (short)x;}' | \
+    /opt/riscv/bin/riscv32-unknown-elf-gcc -xc - -S -o- \
+    -march=rv32imc -O2 -mcustom-fused || true
+
+# Clean up GCC build objects to reduce image size
+RUN find /toolchain/build-gcc-newlib-stage2 -name '*.o' -delete 2>/dev/null || true && \
+    rm -rf /toolchain/gcc/.git
+
+CMD ["cp", "-r", "/opt/riscv/.", "/install/"]

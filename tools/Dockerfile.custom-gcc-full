@@ -1,0 +1,74 @@
+# Docker build for custom RISC-V GCC with fused instruction patterns
+# (monolithic fallback  clone + configure + build all in one)
+#
+# Usage:
+#   docker build -f tools/Dockerfile.custom-gcc-full -t custom-riscv-gcc .
+#   docker build -f tools/Dockerfile.custom-gcc-full -t custom-riscv-gcc \
+#     --build-arg CUSTOM_FUSED_MD=output/conv2d_specialized/custom-fused.md .
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    build-essential git autoconf automake autotools-dev curl \
+    python3 python3-pip libmpc-dev libmpfr-dev libgmp-dev gawk \
+    texinfo libtool patchutils bc zlib1g-dev libexpat-dev \
+    ninja-build pkg-config flex bison libfl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG CUSTOM_FUSED_MD=tools/custom-fused-pass1.md
+ARG PATCHED_RISCV_MD=tools/riscv-md-noop.txt
+
+WORKDIR /toolchain
+
+# Clone riscv-gnu-toolchain
+RUN git clone https://github.com/riscv-collab/riscv-gnu-toolchain.git .
+
+# Full clone of gcc submodule (needed for generated files)
+RUN git submodule update --init gcc && \
+    git submodule update --init --depth 1 binutils newlib
+
+# Verify GCC source
+RUN test -f gcc/gcc/config/riscv/riscv.md && echo "GCC source OK"
+
+# Copy the custom fused patterns file
+COPY ${CUSTOM_FUSED_MD} /toolchain/gcc/gcc/config/riscv/custom-fused.md
+
+RUN echo '' >> /toolchain/gcc/gcc/config/riscv/riscv.md && \
+    echo ';; Custom fused instruction patterns' >> /toolchain/gcc/gcc/config/riscv/riscv.md && \
+    echo '(include "custom-fused.md")' >> /toolchain/gcc/gcc/config/riscv/riscv.md && \
+    printf '\nmcustom-fused\nTarget Mask(CUSTOM_FUSED)\nEnable custom fused instruction patterns.\n' >> /toolchain/gcc/gcc/config/riscv/riscv.opt
+
+# Optionally replace riscv.md with a pre-patched version (disables *extendhisi2 etc.)
+COPY ${PATCHED_RISCV_MD} /tmp/riscv_md_candidate
+RUN if [ $(wc -c < /tmp/riscv_md_candidate) -gt 10000 ] && grep -q '(define_insn' /tmp/riscv_md_candidate; then \
+        echo "Installing patched riscv.md ($(wc -c < /tmp/riscv_md_candidate) bytes, builtin overrides enabled)"; \
+        cp /tmp/riscv_md_candidate /toolchain/gcc/gcc/config/riscv/riscv.md; \
+    else \
+        echo "No patched riscv.md (noop file or invalid content  skipping)"; \
+    fi && rm -f /tmp/riscv_md_candidate
+
+# Configure and build
+RUN ./configure --prefix=/opt/riscv \
+    --with-arch=rv32imc --with-abi=ilp32 \
+    --disable-linux --disable-gdb --disable-multilib
+
+RUN make -j$(nproc)
+
+# Build GIMPLE fusion plugin for 3-gram matching
+COPY tools/gcc-plugin/fused_pass.c /toolchain/fused_pass.c
+RUN GCC_PLUGIN_DIR=$(/opt/riscv/bin/riscv32-unknown-elf-gcc -print-file-name=plugin) && \
+    g++ -shared -fPIC -fno-rtti \
+        -I${GCC_PLUGIN_DIR}/include \
+        -o /opt/riscv/lib/gcc-plugin/fused_pass.so \
+        /toolchain/fused_pass.c || \
+    echo "WARNING: GIMPLE plugin build failed (3-grams will not be available)"
+
+RUN ls -la /opt/riscv/lib/gcc-plugin/fused_pass.so 2>/dev/null || \
+    echo "Plugin not built  3-gram fusion disabled"
+
+RUN echo 'int f(int x){return (short)x;}' | \
+    /opt/riscv/bin/riscv32-unknown-elf-gcc -xc - -S -o- -march=rv32imc -O2 -mcustom-fused || true
+
+CMD ["cp", "-r", "/opt/riscv/.", "/install/"]

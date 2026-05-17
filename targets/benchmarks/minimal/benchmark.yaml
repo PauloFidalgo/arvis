@@ -1,0 +1,8 @@
+# ARVIS benchmark descriptor.
+# Each subdirectory under targets/benchmarks/ that contains one of these files
+# is automatically registered with the pipeline. Edit the entries below or copy
+# this file to a new benchmark directory and adjust the names.
+name: minimal
+elf: minimal_spike.elf            # ELF used by the Spike baseline run
+verilator_elf: minimal.elf        # ELF used by the Verilator CV32E40P testbench
+hex: minimal.hex                  # Hex image loaded by the testbench

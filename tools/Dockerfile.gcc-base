@@ -1,0 +1,60 @@
+# Base Docker image for custom RISC-V GCC builds.
+#
+# This image contains the riscv-gnu-toolchain source fully cloned,
+# submodules initialized, and configured — but NOT yet compiled.
+# It is built ONCE and reused by all pass-specific images.
+#
+# Usage:
+#   docker build -f tools/Dockerfile.gcc-base -t riscv-gcc-base tools/
+#
+# Then each pass image uses:
+#   FROM riscv-gcc-base
+#   COPY custom-fused-passN.md /toolchain/gcc/gcc/config/riscv/custom-fused.md
+#   RUN make -j$(nproc)
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    build-essential git autoconf automake autotools-dev curl \
+    python3 python3-pip libmpc-dev libmpfr-dev libgmp-dev gawk \
+    texinfo libtool patchutils bc zlib1g-dev libexpat-dev \
+    ninja-build pkg-config flex bison libfl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /toolchain
+
+# Clone riscv-gnu-toolchain (full clone of gcc, shallow for others)
+RUN git clone https://github.com/riscv-collab/riscv-gnu-toolchain.git . && \
+    git submodule update --init gcc && \
+    git submodule update --init --depth 1 binutils newlib
+
+# Verify GCC source
+RUN test -f gcc/gcc/config/riscv/riscv.md && echo "GCC source OK"
+
+# Patch riscv.md to include custom-fused.md (placeholder — actual file added by pass images)
+RUN echo '' >> /toolchain/gcc/gcc/config/riscv/riscv.md && \
+    echo ';; Custom fused instruction patterns' >> /toolchain/gcc/gcc/config/riscv/riscv.md && \
+    echo '(include "custom-fused.md")' >> /toolchain/gcc/gcc/config/riscv/riscv.md
+
+# NOTE: The riscv.md builtin pattern patch (for *extendhisi2 etc.) is NOT
+# applied here. It is applied only in the MERGED Docker build when the
+# workload's selected patterns include sign/zero-extend fusions.
+# See codegen/gcc/riscv_md_patcher.py (extracts, patches locally, passes
+# via PATCHED_RISCV_MD build arg to Dockerfile.custom-gcc-pass).
+
+# Add the -mcustom-fused option
+RUN printf '\nmcustom-fused\nTarget Mask(CUSTOM_FUSED)\nEnable custom fused instruction patterns.\n' \
+    >> /toolchain/gcc/gcc/config/riscv/riscv.opt
+
+# Create an empty placeholder so configure doesn't fail
+RUN echo ';; placeholder — replaced by pass-specific .md' > \
+    /toolchain/gcc/gcc/config/riscv/custom-fused.md
+
+# Configure (does NOT compile — that's done per-pass)
+# Only C language (no C++/Fortran) — saves ~40% build time + image size
+RUN ./configure --prefix=/opt/riscv \
+    --with-arch=rv32imc --with-abi=ilp32 \
+    --disable-linux --disable-gdb --disable-multilib \
+    --enable-languages=c

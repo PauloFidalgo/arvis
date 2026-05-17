@@ -1,0 +1,35 @@
+# riscv-gcc-hwloop-fused: GCC with -mhwloop AND -mcustom-fused support
+# Builds on top of riscv-gcc-prebuilt, applies hwloop patches,
+# then rebuilds full stage2 (needed for custom-fused.md include).
+#
+# Usage:
+#   docker build -t riscv-gcc-hwloop-fused .
+
+FROM riscv-gcc-prebuilt
+
+# Apply hwloop patches (option + hooks + md patterns)
+COPY gcc_hwloop_hooks.c /work/gcc_hwloop_hooks.c
+COPY gcc_hwloop_md.md /work/gcc_hwloop_md.md
+COPY gcc_apply_hwloop.sh /work/gcc_apply_hwloop.sh
+RUN bash /work/gcc_apply_hwloop.sh
+
+# Rebuild full stage2 so custom-fused.md include is resolved
+RUN rm -f /toolchain/stamps/build-gcc-newlib-stage2 && \
+    cd /toolchain && make -j$(nproc) ENABLED_LANGUAGES=c stamps/build-gcc-newlib-stage2
+
+# Build GIMPLE fusion plugin
+COPY fused_pass.c /tmp/fused_pass.c
+RUN GCC_PLUGIN_DIR=$(/opt/riscv/bin/riscv32-unknown-elf-gcc -print-file-name=plugin) && \
+    mkdir -p /opt/riscv/lib/gcc-plugin && \
+    g++ -shared -fPIC -fno-rtti \
+        -I${GCC_PLUGIN_DIR}/include \
+        -o /opt/riscv/lib/gcc-plugin/fused_pass.so \
+        /tmp/fused_pass.c && \
+    rm /tmp/fused_pass.c
+
+# Smoke test: both flags together
+RUN echo 'int f(int a,int b){return (a+b)*(a-b);}' | \
+    /opt/riscv/bin/riscv32-unknown-elf-gcc -xc - -S -o- \
+    -march=rv32imc -O2 -mcustom-fused -mhwloop 2>&1 | head -5
+
+CMD ["/opt/riscv/bin/riscv32-unknown-elf-gcc"]

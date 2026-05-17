@@ -1,0 +1,30 @@
+# Pre-built Docker image with binutils + newlib + GCC stage1 already compiled.
+#
+# This is built ONCE (~650s) and never needs rebuilding.
+# Pass-specific images start FROM this and only rebuild GCC stage2
+# (~120s instead of ~650s).
+#
+# Usage:
+#   docker build -f tools/Dockerfile.gcc-prebuilt -t riscv-gcc-prebuilt tools/
+#
+# Size reduction: pass images drop from 25GB to ~18GB (source cleanup).
+
+FROM riscv-gcc-base
+
+# Build binutils + newlib + GCC stage1 (these NEVER change between passes)
+# ENABLED_LANGUAGES=c  only C compiler, no C++/Fortran (~40% faster)
+RUN make -j$(nproc) ENABLED_LANGUAGES=c stamps/build-binutils-newlib && \
+    make -j$(nproc) ENABLED_LANGUAGES=c stamps/build-gcc-newlib-stage1 && \
+    make -j$(nproc) ENABLED_LANGUAGES=c stamps/build-newlib stamps/build-newlib-nano
+
+# Clean up intermediate build artifacts that aren't needed for stage2
+# Keep: /opt/riscv (installed binutils+newlib), build-gcc-newlib-stage2 deps
+RUN rm -rf /toolchain/build-binutils-newlib/libiberty \
+           /toolchain/build-binutils-newlib/opcodes/*.o \
+           /toolchain/build-binutils-newlib/gas/*.o \
+           /toolchain/build-binutils-newlib/ld/*.o \
+           /toolchain/build-newlib-nano \
+    && find /toolchain/build-binutils-newlib -name '*.a' -size +1M -delete 2>/dev/null || true
+
+# Mark that binutils + newlib are done (stamps should exist from make)
+RUN ls stamps/build-binutils-newlib stamps/build-gcc-newlib-stage1 stamps/build-newlib

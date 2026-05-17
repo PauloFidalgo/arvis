@@ -1,0 +1,64 @@
+# Pass-specific Docker image for custom RISC-V GCC.
+#
+# Builds FROM the pre-configured base image (riscv-gcc-base),
+# copies the pass-specific .md file, and compiles GCC.
+# This avoids re-cloning and re-configuring for every pass.
+#
+# Usage (without builtin override):
+#   docker build -f tools/Dockerfile.custom-gcc-pass \
+#     --build-arg CUSTOM_FUSED_MD=tools/custom-fused-pass1.md \
+#     -t custom-riscv-gcc-pass1 .
+#
+# Usage (with builtin override for sign/zero-extend patterns):
+#   docker build -f tools/Dockerfile.custom-gcc-pass \
+#     --build-arg CUSTOM_FUSED_MD=output/kyber_specialized/custom-fused.md \
+#     --build-arg PATCHED_RISCV_MD=tools/.riscv-md-cache/riscv.md.patched \
+#     -t custom-riscv-gcc-merged .
+
+FROM riscv-gcc-base
+
+# Build arg: path to the custom-fused.md file relative to the build context
+ARG CUSTOM_FUSED_MD=tools/custom-fused-pass1.md
+
+# Build arg: path to a pre-patched riscv.md file (generated locally by
+# codegen/gcc/riscv_md_patcher.py). When provided, replaces GCC's built-in
+# riscv.md to disable *extendhisi2 etc. when -mcustom-fused is active.
+# Default: tools/riscv-md-noop.txt (a dummy file that signals "no patch").
+ARG PATCHED_RISCV_MD=tools/riscv-md-noop.txt
+
+# Copy the pass-specific patterns file (overrides the placeholder)
+COPY ${CUSTOM_FUSED_MD} /toolchain/gcc/gcc/config/riscv/custom-fused.md
+
+# Copy the (possibly patched) riscv.md replacement.
+# If PATCHED_RISCV_MD points to a real patched file, it replaces the original.
+# If it points to the noop dummy, the install script detects it and skips.
+COPY ${PATCHED_RISCV_MD} /tmp/riscv_md_candidate
+RUN if [ $(wc -c < /tmp/riscv_md_candidate) -gt 10000 ] && grep -q '(define_insn' /tmp/riscv_md_candidate; then \
+        echo "Installing patched riscv.md ($(wc -c < /tmp/riscv_md_candidate) bytes, builtin overrides enabled)"; \
+        cp /tmp/riscv_md_candidate /toolchain/gcc/gcc/config/riscv/riscv.md; \
+    else \
+        echo "No riscv.md patch (using original built-in patterns)"; \
+    fi && rm -f /tmp/riscv_md_candidate
+
+# Build GCC with the pass-specific patterns
+# Limit parallelism to avoid OOM (GCC build needs ~8GB RAM)
+RUN make -j$(nproc)
+
+# Build GIMPLE fusion plugin for 3-gram matching.
+# The plugin is only ACTIVATED when -fplugin flags are passed
+# at compile time (only in the final merged compile, not passes 1-3).
+COPY tools/gcc-plugin/fused_pass.c /toolchain/fused_pass.c
+RUN mkdir -p /opt/riscv/lib/gcc-plugin && \
+    GCC_PLUGIN_DIR=$(/opt/riscv/bin/riscv32-unknown-elf-gcc -print-file-name=plugin) && \
+    g++ -shared -fPIC -fno-rtti \
+        -I${GCC_PLUGIN_DIR}/include \
+        -o /opt/riscv/lib/gcc-plugin/fused_pass.so \
+        /toolchain/fused_pass.c && \
+    test -f /opt/riscv/lib/gcc-plugin/fused_pass.so
+
+# Quick smoke test
+RUN echo 'int f(int x){return (short)x;}' | \
+    /opt/riscv/bin/riscv32-unknown-elf-gcc -xc - -S -o- \
+    -march=rv32imc -O2 -mcustom-fused || true
+
+CMD ["cp", "-r", "/opt/riscv/.", "/install/"]

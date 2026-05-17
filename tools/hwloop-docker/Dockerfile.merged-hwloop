@@ -1,0 +1,39 @@
+# riscv-gcc-merged-hwloop: GCC with BOTH run-specific -mcustom-fused patterns
+# AND -mhwloop support.
+#
+# Builds on top of custom-riscv-gcc-merged (built per pipeline run, contains
+# the benchmark-specific merged fusion patterns in custom-fused.md).
+# Applies the hwloop GCC patches (option + hooks + md patterns) and rebuilds
+# cc1 from stage1 so that both flags are active in the same compiler binary.
+#
+# The stage1 build directory is preserved in custom-riscv-gcc-merged
+# (inherited from riscv-gcc-prebuilt via Dockerfile.gcc-fast). Rebuilding cc1
+# from stage1 picks up the already-updated custom-fused.md source, so the
+# resulting cc1 recognises -mcustom-fused patterns AND -mhwloop.
+#
+# fused_pass.so (GIMPLE 3-gram plugin) is inherited from the merged image and
+# remains valid after cc1 is replaced (plugins link against the plugin headers,
+# not cc1 directly).
+#
+# This image is rebuilt automatically by pipeline/hwloop.py for each run
+# because custom-riscv-gcc-merged changes with every new set of fusion patterns.
+#
+# Manual build (from repo root):
+#   docker build -t riscv-gcc-merged-hwloop \
+#     -f tools/hwloop-docker/Dockerfile.merged-hwloop \
+#     tools/hwloop-docker/
+
+FROM custom-riscv-gcc-merged
+
+COPY gcc_hwloop_hooks.c /work/gcc_hwloop_hooks.c
+COPY gcc_hwloop_md.md /work/gcc_hwloop_md.md
+COPY gcc_apply_hwloop.sh /work/gcc_apply_hwloop.sh
+
+RUN bash /work/gcc_apply_hwloop.sh
+
+# Smoke test: both flags together
+RUN echo 'int f(int a,int b){return (a+b)*(a-b);}' | \
+    /opt/riscv/bin/riscv32-unknown-elf-gcc -xc - -S -o- \
+    -march=rv32imc -O2 -mcustom-fused -mhwloop 2>&1 | head -5
+
+CMD ["/opt/riscv/bin/riscv32-unknown-elf-gcc"]

@@ -1,0 +1,41 @@
+ARVIS: Automated RISC-V Workload-Specific Specialisation
+Copyright 2026 Paulo Fidalgo and ARVIS contributors.
+
+This product includes software developed at the Faculty of Engineering,
+University of Porto.
+
+================================================================================
+Third-party components
+================================================================================
+
+This repository includes or interfaces with the following third-party software,
+each under its own license. Their respective LICENSE/NOTICE files apply.
+
+CV32E40P RISC-V core (targets/cv32e40p/)
+    Copyright OpenHW Group and contributors.
+    Licensed under the Solderpad Hardware License v2.1 (Apache 2.0 derivative).
+    Source: https://github.com/openhwgroup/cv32e40p
+    See targets/cv32e40p/LICENSE for the full text.
+
+GCC plugin (tools/gcc-plugin/)
+    The C source files in tools/gcc-plugin/ link into the GNU Compiler
+    Collection. They are distributed under the GNU General Public License
+    v3.0 or later. See tools/gcc-plugin/LICENSE.
+    GCC itself is distributed by the Free Software Foundation under GPL.
+
+SkyWater Open Source PDK (referenced, not bundled)
+    Copyright Google LLC and SkyWater Technology Foundry.
+    Required by the ASIC synthesis flow but not redistributed in this
+    repository. Users must download it separately.
+    Source: https://github.com/google/skywater-pdk
+
+Tools referenced by the pipeline
+    Yosys                Open Synthesis Suite, ISC license
+    Verilator            SystemVerilog simulator, LGPL/Artistic
+    LibreLane            Open ASIC flow, Apache 2.0
+    Vivado               AMD/Xilinx, proprietary
+    pyslang              SystemVerilog parser, MIT
+    sv2v                 SystemVerilog → Verilog, BSD-3-Clause
+
+Each tool ships with its own license; ARVIS calls them as external
+processes and does not redistribute them.

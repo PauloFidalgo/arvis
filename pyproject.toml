@@ -1,0 +1,86 @@
+[project]
+name = "arvis"
+version = "0.1.0"
+description = "Automated RISC-V Workload-Specific Specialisation toolchain"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Paulo Fidalgo", email = "up201806603@up.pt" },
+]
+requires-python = ">=3.12"
+dependencies = [
+    "jinja2>=3.1.6",
+    "numpy>=2.4.2",
+    "pyslang>=10.0.0",
+    "pyyaml>=6.0.3",
+    "scipy>=1.17.0",
+]
+
+[project.scripts]
+arvis = "arvis.main:main"
+
+[project.urls]
+Homepage = "https://github.com/PauloFidalgo/arvis"
+Repository = "https://github.com/PauloFidalgo/arvis"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.0",
+    "types-pyyaml>=6.0.12.20250915",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["arvis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=arvis --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pyslang.*"
+follow_imports = "skip"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E741: variables named `l`, `I`, `O` are pervasive in the analysis layer
+#       (they map to "loop", "instruction", "operand") and renaming would
+#       hurt readability without practical benefit.
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"arvis/report/html_report.py" = ["E501"]
+"arvis/report/html_sections.py" = ["E501"]
+"arvis/codegen/spike/spike_extension_gen.py" = ["E501"]
+"arvis/codegen/rtl/*_pragma.py" = ["E501"]
+"arvis/codegen/rtl/*_patcher.py" = ["E501"]
+
+[tool.coverage.run]
+source = ["arvis"]
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ ==",
+    "raise NotImplementedError",
+]

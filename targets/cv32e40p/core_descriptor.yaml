@@ -1,0 +1,243 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Core Descriptor: CV32E40P
+# ═══════════════════════════════════════════════════════════════════════
+# This file describes the RTL structure, signal interface, and prunable
+# features of the OpenHW CV32E40P RISC-V core.
+#
+# The specialization tool reads this descriptor to know:
+#   - Where RTL files live and what modules they contain
+#   - What ALU signals to drive for fused instructions
+#   - What pragma markers exist for patching
+#   - What hardware features can be pruned and how
+#   - How to run simulation and synthesis
+#
+# To support a different core, create a new core_descriptor.yaml with
+# the same structure but different values.
+# ═══════════════════════════════════════════════════════════════════════
+
+core:
+  name: cv32e40p
+  isa: rv32imc
+  register_file:
+    num_regs: 32
+    read_ports: 3
+    write_ports: 2
+
+# ── RTL file layout ──────────────────────────────────────────────────
+rtl:
+  root: rtl/
+  files:
+    pkg: include/cv32e40p_pkg.sv
+    decoder: cv32e40p_decoder.sv
+    alu: cv32e40p_alu.sv
+    mult: cv32e40p_mult.sv
+    core: cv32e40p_core.sv
+    top: cv32e40p_top.sv
+    ex_stage: cv32e40p_ex_stage.sv
+    if_stage: cv32e40p_if_stage.sv
+    id_stage: cv32e40p_id_stage.sv
+    cs_registers: cv32e40p_cs_registers.sv
+
+# ── ALU signal interface ─────────────────────────────────────────────
+alu:
+  input_a: operand_a_i
+  input_b: operand_b_i
+  input_c: operand_c_i
+  output: result_o
+  operator_signal: operator_i
+  enum_prefix: "ALU_"
+  enum_width: 7
+  enum_format: "{width}'b{value:0{width}b}"
+  # Fused immediate bus: 10-bit immediate extracted from instruction
+  # encoding fields (rs2[4:0] + rs3[4:0]) for patterns with variable
+  # immediates. Only added to RTL when needed by fused patterns.
+  fused_imm: fused_imm_i
+  fused_imm_width: 10
+  # Source bits in the instruction word:
+  #   fused_imm[4:0]  = instr_rdata_i[24:20]  (rs2 field)
+  #   fused_imm[9:5]  = instr_rdata_i[31:27]  (rs3 field, R4-type)
+
+# ── Pragma markers for in-place RTL patching ─────────────────────────
+pragmas:
+  prefix: ARVIS_FUSED
+  begin_format: "// {prefix}_BEGIN: {tag}"
+  end_format: "// {prefix}_END: {tag}"
+  tags:
+    alu_opcodes: alu_opcodes
+    decoder_cases: decoder_custom0
+    result_mux: result_mux
+
+# ── Custom instruction encoding space ────────────────────────────────
+encoding:
+  opcodes:
+    - { name: CUSTOM_0, value: 0x0B }
+    - { name: CUSTOM_1, value: 0x2B }
+  funct3_map:
+    2in_1out: 0
+    2in_2out: 1
+    3in_1out: 2
+    3in_2out: 3
+  # R-type: funct3 >= 4, funct7 0-127 (32 per funct3 per opcode)
+  # R4-type: funct3 0-3, funct2 0-3 (4 per funct3 per opcode)
+  r_type_funct7_max: 32
+  r4_type_funct2_max: 4
+
+# ── Prunable hardware features ───────────────────────────────────────
+pruning:
+  # Each feature maps to:
+  #   parameter:        RTL parameter name to gate it
+  #   file:             RTL file key (from rtl.files)
+  #   module:           SV module name to add the parameter to
+  #   instance_marker:  String to find the instantiation to wrap
+  #   instructions:     ISA mnemonics that require this feature
+  #   fallback_expr:    SV expression for when feature is disabled
+  features:
+    divider:
+      parameter: ENABLE_DIV
+      file: alu
+      module: cv32e40p_alu
+      instance_marker: "cv32e40p_alu_div alu_div_i"
+      fallback_expr: "assign div_ready = 1'b0; assign div_result = '0;"
+      instructions: [div, divu, rem, remu]
+
+    multiplier:
+      parameter: ENABLE_MUL
+      file: ex_stage
+      module: cv32e40p_ex_stage
+      instance_marker: "cv32e40p_mult mult_i"
+      fallback_expr: "assign mult_result = '0; assign mult_ready = 1'b1;"
+      instructions: [mul]
+
+    mulh_fsm:
+      parameter: ENABLE_MULH
+      files: [mult, ex_stage]
+      modules: [cv32e40p_mult, cv32e40p_ex_stage]
+      instructions: [mulh, mulhsu, mulhu]
+
+    sleep_unit:
+      parameter: ENABLE_SLEEP
+      file: core
+      module: cv32e40p_core
+      instance_marker: "cv32e40p_sleep_unit #("
+      fallback_expr: "assign core_sleep_o = 1'b0;"
+      instructions: [wfi]
+
+    compressed:
+      parameter: ENABLE_COMPRESSED
+      file: if_stage
+      module: cv32e40p_if_stage
+      instance_marker: "cv32e40p_compressed_decoder"
+      # No explicit instructions — detected by c.* prefix
+
+    dot_product:
+      parameter: ENABLE_DOT_MUL
+      file: mult
+      module: cv32e40p_mult
+      instructions: []
+      removable_case_labels: [MUL_DOT8, MUL_DOT16]
+
+    msu_path:
+      parameter: ENABLE_MSU
+      file: mult
+      module: cv32e40p_mult
+      instructions: []
+
+    popcnt:
+      parameter: ENABLE_POPCNT
+      file: alu
+      module: cv32e40p_alu
+      instance_marker: "cv32e40p_popcnt popcnt_i"
+      instructions: []
+
+    ff1:
+      parameter: ENABLE_FF1
+      file: alu
+      module: cv32e40p_alu
+      instance_marker: "cv32e40p_ff_one ff_one_i"
+      instructions: []
+
+    regfile_wr_b:
+      parameter: ENABLE_REGFILE_WR_B
+      instructions: []
+
+    debug:
+      parameter: DEBUG_TRIGGER_EN
+      instructions: [ebreak]
+
+    hpm:
+      parameter: NUM_MHPMCOUNTERS
+      file: cs_registers
+      module: cv32e40p_cs_registers
+      instructions: []
+
+  # Parameter propagation: which modules need which parameters
+  # Order matters — propagate bottom-up (leaf → top)
+  propagation:
+    - module: cv32e40p_alu
+      file: alu
+      params: [ENABLE_DIV]
+    - module: cv32e40p_mult
+      file: mult
+      params: [ENABLE_MULH]
+    - module: cv32e40p_ex_stage
+      file: ex_stage
+      params: [ENABLE_MULH, ENABLE_MUL]
+    - module: cv32e40p_core
+      file: core
+      params: [ENABLE_DIV, ENABLE_MUL, ENABLE_MULH, ENABLE_SLEEP]
+    - module: cv32e40p_top
+      file: top
+      params: [ENABLE_DIV, ENABLE_MUL, ENABLE_MULH, ENABLE_SLEEP]
+
+  # PULP-extension specific labels that can be pruned
+  pulp_alu_ops:
+    - ALU_BCLR
+    - ALU_BSET
+    - ALU_BREV
+    - ALU_SHUF
+    - ALU_SHUF2
+    - ALU_PACK
+    - ALU_PACKH
+    - ALU_CLIP
+    - ALU_CLIPU
+    - ALU_INS
+
+  pulp_mul_ops:
+    - MUL_DOT8
+    - MUL_DOT16
+
+  # Baseline synthesis parameters (non-PULP, non-FPU)
+  base_synthesis_params:
+    COREV_PULP: 0
+    FPU: 0
+
+  # PULP-only module instances to wrap in generate-if(COREV_PULP)
+  pulp_instances:
+    - file: core
+      markers:
+        - { start: "cv32e40p_int_controller", param: COREV_PULP }
+        - { start: "cv32e40p_hwloop_regs", param: COREV_PULP }
+        - { start: "cv32e40p_apu_disp", param: COREV_PULP }
+    - file: alu
+      markers:
+        - { start: "cv32e40p_popcnt", param: COREV_PULP }
+        - { start: "cv32e40p_ff_one", param: COREV_PULP }
+    - file: if_stage
+      markers:
+        - { start: "cv32e40p_aligner", param: ENABLE_COMPRESSED }
+
+# ── Simulation ───────────────────────────────────────────────────────
+simulation:
+  top_module: tb_top
+  testbench_dir: example_tb
+  timeout_cycles: 500000000
+  timeout_seconds: 600
+
+# ── Synthesis ────────────────────────────────────────────────────────
+synthesis:
+  top_module: cv32e40p_core
+  exclude_files:
+    - cv32e40p_register_file_latch.sv
+    - cv32e40p_fp_wrapper.sv
+    - cv32e40p_ispm.sv
+  bhv_clock_gate: cv32e40p_sim_clock_gate.sv

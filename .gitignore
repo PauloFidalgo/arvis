@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+.python-version
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test / coverage
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated artifacts
+output/
+logs/
+*.log
+*.elf
+*.hex
+*.bin
+*.o
+*.a
+
+# Compiled assembly the pipeline regenerates
+targets/benchmarks/*/*.s
+!targets/benchmarks/*/*_plain.s
+targets/benchmarks/*/*.elf*
+targets/benchmarks/*/*.hex*
+targets/benchmarks/*/traces/
+
+# Verilator build artifacts
+obj_dir/
+*.gch
+
+# ASIC / FPGA tool outputs
+librelane_runs/
+runs/
+*.odb
+*.gds
+*.mag
+*.ext
+*.lib
+*.def
+
+# Vendored upstream toolchains (use submodules instead)
+riscv-gnu-toolchain/
+embench-iot/
+
+# Local notes and scratch
+*.tmp
+scratch/
