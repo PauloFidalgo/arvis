@@ -81,7 +81,7 @@ def run_pipeline(cfg: ToolConfig, ctx: PipelineContext) -> None:
 
     # ── HTML Report ──
     from arvis.cli import print_success
-    from report.html_report import generate_html_report
+    from arvis.report.html_report import generate_html_report
 
     report_path = generate_html_report(cfg, ctx)
     ctx.report_path = report_path
@@ -1131,7 +1131,7 @@ def _evaluate_hwloop_via_pipeline(
         target=target,
         toolchain=None,  # type: ignore[arg-type]
         strategies=[],
-        verifier=verifier,  # type: ignore[arg-type]
+        verifier=verifier,
         synthesis=synth,
         variants=[],
     )
@@ -1147,7 +1147,7 @@ def _evaluate_hwloop_via_pipeline(
         legacy_cand = cand_by_depth.get(depth)
         if legacy_cand is None or not legacy_cand.fused_hex:
             raise FileNotFoundError(f"no hex for HW_LOOP={depth}")
-        return legacy_cand.fused_hex
+        return str(legacy_cand.fused_hex)
 
     evaluator = HWLoopVariantEvaluator(
         target=target,
@@ -1172,7 +1172,7 @@ def _evaluate_hwloop_via_pipeline(
         r.cycles = int(metrics.get("cycles", 0))
         r.cells = int(metrics.get("cells", 0))
         r.passed = bool(metrics.get("passed", 0))
-        r._candidate = cand  # store for downstream consumers
+        r._candidate = cand  # type: ignore[attr-defined]  # store for downstream consumers
 
         status = f"{r.cycles:,} cycles, {r.cells:,} cells" if r.passed else "FAIL"
         print_info(f"HW_LOOP={cand.hw_loop}: {cand.loops_patched} loops, {status}")
@@ -1369,7 +1369,11 @@ def _select_hwloop_winners(results):
         return SweepWinners()
 
     sweep = HWLoopDepthSweep(candidates_by_depth=candidates_by_depth)
-    decision = sweep.analyze(workload=None, profile=None, target=None)
+    decision = sweep.analyze(
+        workload=None,  # type: ignore[arg-type]  # legacy table-lookup evaluator ignores
+        profile=None,  # type: ignore[arg-type]   # legacy table-lookup evaluator ignores
+        target=None,  # type: ignore[arg-type]    # legacy table-lookup evaluator ignores
+    )
 
     winners = SweepWinners()
 

@@ -394,6 +394,7 @@ The portability layer was introduced incrementally:
 | **5.1 - 5.7** | next | Generalised hyperparameter-sweep framework (``core/sweep.py``) with 4 search strategies (Grid/Random/Bayesian/Halving) over multi-parameter spaces.  Existing FIFO + HW_LOOP sweeps become 30-line subclasses.  See ``docs/sweep.md``. |
 | **5b** | `4144752` | HW_LOOP sweep selection routed through ``HWLoopDepthSweep``.  ``pick_best`` replaced by ``_select_hwloop_winners`` + ``_print_hwloop_sweep_table`` helpers. |
 | **6** | this | ``--use-pipeline-runner`` gateway routes the HW_LOOP sweep's per-candidate sim+synth through ``Pipeline._emit_variant`` + ``VerilatorVerifier`` + ``YosysSynthesisFlow``.  See ``docs/runner-replacement.md``. |
+| **6.5 - 6.9** | this | Production-grade polish: concrete ``MarkdownReporter``, end-to-end ``Pipeline.run()`` smoke harness, mypy gap documented, production readiness checklist.  All four abstract roles (``Verifier``, ``SynthesisFlow``, ``Reporter``, ``Toolchain``) now have at least one concrete implementation; ``Pipeline.run()`` drives the complete analyze -> emit -> verify -> synthesise -> report flow. |
 
 ### Phase 2.8: the portability gateway
 
