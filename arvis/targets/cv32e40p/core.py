@@ -95,11 +95,11 @@ class CV32E40P(TargetCore):
             description="Number of hardware-loop nest levels (0=disabled).",
         ),
         CoreParameter(
-            name="HW_LOOP_CNT_WIDTH",
+            name="CNT_WIDTH",
             default=32,
             minimum=8,
             maximum=32,
-            description="Counter-register width in bits.",
+            description="Hardware-loop counter register width in bits.",
         ),
         CoreParameter(
             name="HWLP_ADDR_WIDTH",
@@ -231,3 +231,22 @@ class CV32E40P(TargetCore):
     def testbench_dir(self) -> Path:
         """Path to the Verilator testbench shipped with the core."""
         return self._rtl_root / "example_tb" / "core"
+
+    # ── Decision rendering (Phase 2) ──────────────────────────────
+    # Each render_* method translates one Decision shape into a
+    # list of RTLPatches that the pipeline applies in order to a
+    # fresh workspace.  Phase 2.1 implements the width path; the
+    # other three roles still inherit no-op stubs from TargetCore
+    # (see Phase 2.2-2.4 for their implementations).
+
+    def render_width_decision(self, decision, workspace):
+        """Render a :class:`WidthDecision` to a list of patches.
+
+        Returns a single :class:`WidthNarrowingPatch` carrying all
+        three narrowings (PC, HWLP addr, counter).  When the
+        decision is fully default (all widths >= 32, pc_width == 0)
+        the patch is a no-op.
+        """
+        from arvis.targets.cv32e40p.patches import WidthNarrowingPatch
+
+        return [WidthNarrowingPatch(decision=decision)]

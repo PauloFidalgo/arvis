@@ -63,7 +63,7 @@ class CounterWidthNarrowing(WidthStrategy):
         return "counter-width-narrowing"
 
     def applicable(self, workload: "Workload", target: "TargetCore") -> bool:
-        return target.parameter("HW_LOOP_CNT_WIDTH") is not None
+        return target.parameter("CNT_WIDTH") is not None
 
     def analyze(
         self,
