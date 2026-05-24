@@ -14,6 +14,11 @@ returns the same ``SweepWinners`` shape as the legacy
   * ``same`` is True iff both winners point at the same depth
   * an empty / all-failed result list returns
     ``SweepWinners(best_adp=0, best_cycles=0)``
+
+Cross-repo support: this file works on both the private
+``tese`` layout (``pipeline.hwloop_sweep``) and the public
+``arvis-public`` layout (``arvis.pipeline.hwloop_sweep``) by
+trying both import paths via :func:`_import_legacy`.
 """
 
 from __future__ import annotations
@@ -24,13 +29,50 @@ from contextlib import redirect_stdout
 import pytest
 
 
-def _make_result(hw_loop: int, cycles: int, cells: int, passed: bool = True):
-    """Build a synthetic ``HWLoopSweepResult``.
+def _import_legacy() -> tuple:
+    """Return ``(HWLoopSweepResult, SweepWinners, pick_best,
+    _select_hwloop_winners, _print_hwloop_sweep_table)``.
 
-    The legacy class lives in ``pipeline/hwloop_sweep.py``.
+    Tries the bare ``pipeline.*`` import first (private tese
+    layout); falls back to ``arvis.pipeline.*`` (public
+    arvis-public layout).  Skips the test if neither is
+    importable.
     """
-    from arvis.pipeline.hwloop_sweep import HWLoopSweepResult
+    try:
+        from pipeline.hwloop_sweep import (
+            HWLoopSweepResult,
+            SweepWinners,
+            pick_best,
+        )
+        from pipeline.runner import (
+            _print_hwloop_sweep_table,
+            _select_hwloop_winners,
+        )
+    except ImportError:
+        try:
+            from arvis.pipeline.hwloop_sweep import (  # type: ignore[import-not-found, no-redef]
+                HWLoopSweepResult,
+                SweepWinners,
+                pick_best,
+            )
+            from arvis.pipeline.runner import (  # type: ignore[import-not-found, no-redef]
+                _print_hwloop_sweep_table,
+                _select_hwloop_winners,
+            )
+        except ImportError:
+            pytest.skip("legacy pipeline modules not available")
+    return (
+        HWLoopSweepResult,
+        SweepWinners,
+        pick_best,
+        _select_hwloop_winners,
+        _print_hwloop_sweep_table,
+    )
 
+
+def _make_result(hw_loop: int, cycles: int, cells: int, passed: bool = True):
+    """Build a synthetic ``HWLoopSweepResult``."""
+    HWLoopSweepResult = _import_legacy()[0]
     r = HWLoopSweepResult(hw_loop=hw_loop, loops_patched=1)
     r.cycles = cycles
     r.cells = cells
@@ -40,13 +82,12 @@ def _make_result(hw_loop: int, cycles: int, cells: int, passed: bool = True):
 
 def test_select_winners_picks_best_adp_and_cycles_separately():
     """When ADP-best != cycles-best, both winners are surfaced."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.runner import _select_hwloop_winners
+    _, _, _, _select_hwloop_winners, _ = _import_legacy()
 
     # Three candidates, all passing:
     #   hw=2: 1000 cycles, 10000 cells -> ADP = 10
     #   hw=3:  900 cycles, 10500 cells -> ADP = 9.45  (best ADP)
-    #   hw=4:  800 cycles, 12000 cells -> ADP = 9.6   (best cycles, but more cells)
+    #   hw=4:  800 cycles, 12000 cells -> ADP = 9.6   (best cycles, more cells)
     results = [
         _make_result(hw_loop=2, cycles=1000, cells=10000),
         _make_result(hw_loop=3, cycles=900, cells=10500),
@@ -66,8 +107,7 @@ def test_select_winners_picks_best_adp_and_cycles_separately():
 
 def test_select_winners_same_when_one_candidate_dominates():
     """When the same depth is best by both metrics, ``same=True``."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.runner import _select_hwloop_winners
+    _, _, _, _select_hwloop_winners, _ = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=1000, cells=10000),
@@ -86,12 +126,11 @@ def test_select_winners_same_when_one_candidate_dominates():
 
 def test_select_winners_excludes_failed_candidates():
     """``passed=False`` candidates are skipped during selection."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.runner import _select_hwloop_winners
+    _, _, _, _select_hwloop_winners, _ = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=1000, cells=10000, passed=True),
-        _make_result(hw_loop=3, cycles=0, cells=0, passed=False),  # failed sim
+        _make_result(hw_loop=3, cycles=0, cells=0, passed=False),  # failed
         _make_result(hw_loop=4, cycles=500, cells=12000, passed=True),
     ]
 
@@ -106,8 +145,7 @@ def test_select_winners_excludes_failed_candidates():
 
 def test_select_winners_empty_results_returns_zero_winners():
     """An empty list -> ``SweepWinners(best_adp=0, best_cycles=0)``."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.runner import _select_hwloop_winners
+    _, _, _, _select_hwloop_winners, _ = _import_legacy()
 
     sink = io.StringIO()
     with redirect_stdout(sink):
@@ -119,8 +157,7 @@ def test_select_winners_empty_results_returns_zero_winners():
 
 def test_select_winners_all_failed_returns_zero_winners():
     """When every candidate failed, the framework reports no winner."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.runner import _select_hwloop_winners
+    _, _, _, _select_hwloop_winners, _ = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=0, cells=0, passed=False),
@@ -137,11 +174,9 @@ def test_select_winners_all_failed_returns_zero_winners():
 
 def test_select_winners_matches_legacy_pick_best():
     """Behavioural equivalence: the new selection picks the same
-    ADP winner as the legacy :func:`pipeline.hwloop_sweep.pick_best`.
+    ADP winner as the legacy ``pipeline.hwloop_sweep.pick_best``.
     """
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.hwloop_sweep import pick_best
-    from arvis.pipeline.runner import _select_hwloop_winners
+    _, _, pick_best, _select_hwloop_winners, _ = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=1500, cells=10000),
@@ -152,7 +187,10 @@ def test_select_winners_matches_legacy_pick_best():
     sink = io.StringIO()
     with redirect_stdout(sink):
         legacy_winners, _ = pick_best(
-            [_make_result(r.hw_loop, r.cycles, r.cells, r.passed) for r in results]
+            [
+                _make_result(r.hw_loop, r.cycles, r.cells, r.passed)
+                for r in results
+            ]
         )
     sink2 = io.StringIO()
     with redirect_stdout(sink2):
@@ -164,11 +202,8 @@ def test_select_winners_matches_legacy_pick_best():
 
 
 def test_print_hwloop_sweep_table_includes_markers():
-    """The table prints ``◀ best ADP`` / ``◀ best cycles`` markers
-    next to the winning row(s)."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.hwloop_sweep import SweepWinners
-    from arvis.pipeline.runner import _print_hwloop_sweep_table
+    """The table prints ``◀ best ADP`` / ``◀ best cycles`` markers."""
+    _, SweepWinners, _, _, _print_hwloop_sweep_table = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=1000, cells=10000),
@@ -191,9 +226,7 @@ def test_print_hwloop_sweep_table_includes_markers():
 
 def test_print_hwloop_sweep_table_marks_failures():
     """Failed candidates print a ``FAIL`` row with no metrics."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.hwloop_sweep import SweepWinners
-    from arvis.pipeline.runner import _print_hwloop_sweep_table
+    _, SweepWinners, _, _, _print_hwloop_sweep_table = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=1000, cells=10000),
@@ -212,11 +245,8 @@ def test_print_hwloop_sweep_table_marks_failures():
 
 
 def test_print_hwloop_sweep_table_separate_winners_message():
-    """When ADP and cycles winners differ, both are listed in the
-    final summary line."""
-    pytest.importorskip("pipeline.hwloop_sweep")
-    from arvis.pipeline.hwloop_sweep import SweepWinners
-    from arvis.pipeline.runner import _print_hwloop_sweep_table
+    """When ADP and cycles winners differ, both appear in the summary."""
+    _, SweepWinners, _, _, _print_hwloop_sweep_table = _import_legacy()
 
     results = [
         _make_result(hw_loop=2, cycles=1000, cells=10000),
