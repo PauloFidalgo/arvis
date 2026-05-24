@@ -238,6 +238,14 @@ class WidthDecision(Decision):
     pc_width: int = 0
     hwlp_addr_width: int = 32
     counter_width: int = 32
+    fifo_depth: int = 0
+    """Prefetch buffer FIFO depth tuning.  ``0`` means leave the
+    template default in place; positive values rewrite the
+    ``localparam FIFO_DEPTH`` in ``cv32e40p_prefetch_buffer.sv``.
+    Determined by the bottleneck analysis stage, not by a width
+    strategy proper -- but kept here because it shares the same
+    "single integer that rewrites a parameter" emission path.
+    """
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
         return []

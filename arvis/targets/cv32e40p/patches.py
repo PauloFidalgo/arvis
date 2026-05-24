@@ -113,6 +113,25 @@ class WidthNarrowingPatch(RTLPatch):
                 self.decision.counter_width,
             )
 
+        # ── Prefetch FIFO depth: localparam rewrite in
+        #    cv32e40p_prefetch_buffer.sv.  Mirrors legacy
+        #    RTLChangeSet.apply lines 169-181.
+        if self.decision.fifo_depth > 0:
+            pfb = rtl_dir / "cv32e40p_prefetch_buffer.sv"
+            if pfb.exists():
+                text = pfb.read_text()
+                new_text = re.sub(
+                    r"localparam FIFO_DEPTH\s*=\s*\d+;",
+                    (
+                        f"localparam FIFO_DEPTH                     = "
+                        f"{self.decision.fifo_depth}; "
+                        f"// ARVIS: auto-tuned from bottleneck analysis"
+                    ),
+                    text,
+                )
+                if new_text != text:
+                    pfb.write_text(new_text)
+
     # ── Helpers ────────────────────────────────────────────────────
     @staticmethod
     def _rewrite_parameter(rtl_dir: Path, name: str, value: int) -> None:

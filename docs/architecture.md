@@ -385,12 +385,67 @@ The portability layer was introduced incrementally:
 | **1.1–1.7** | `daf82a9..83697d8` | `core/` abstractions; concrete strategies and target; `Pipeline.run()` in decisions-only mode. |
 | **2.1–2.4** | `8d6b3e2..0820409` | Real `RTLPatch` implementations for each Decision type. |
 | **2.5–2.7** | `5d32664..1af0adb` | Standard variant configs; per-variant emission; equivalence test for `PRUNED`. |
-| **3** | committed | Doc, test suite, full equivalence, typed-field migration (target_payload removed), partial codegen factoring. |
-| **3 (in progress)** | next | Encoding allocator extraction; FUSED_PRUNED / HWLOOP_PRUNED / ALL equivalence; runner.py replacement (gated). |
+| **2.7b** | `28d72a2` | Equivalence test extended to all 5 variants (residual diffs: 0/2/2/4/4). |
+| **2.7c** | `e7f6551` | Three load-bearing fixes drove residual diffs to **0/0/0/0/0** byte-identical. |
+| **3** | committed | Doc, test suite, typed-field migration (target_payload removed), partial codegen factoring. |
+| **2.8** | this | `--use-portability` flag wires `RTLChangeSet.apply` to the portable path; gateway smoke shows byte-equivalence on all 4 cs.apply variants. |
+
+### Phase 2.8: the portability gateway
+
+The active production path is still the legacy
+`RTLChangeSet.apply` body.  Phase 2.8 introduces an opt-in
+gateway: when the user passes `--use-portability` (or sets
+`ARVIS_USE_PORTABILITY=1`), `apply()` routes through
+`targets/cv32e40p/portability_shim.emit_via_portability` instead
+of running its own emission code.
+
+The shim is a thin translator:
+
+1. **Translate** the changeset's untyped state
+   (`prune_config`, `fused_operations`, `hw_loop_count`,
+   `pc_width`, `prefetch_fifo_depth`, ...) into typed
+   `Decision` instances.
+2. **Synthesise** a `VariantConfig` from the set of non-trivial
+   decisions present (no hardcoded variant taxonomy: any subset
+   the changeset describes is emittable).
+3. **Emit** by setting up an `RTLWorkspace` rooted at
+   `ctx.rtl_output_dir` and running
+   `target.allocate_workspace_metadata` + the canonical patch
+   sequence (`PruneDecision` → `FusionDecision` →
+   `LoopDecision` → `WidthDecision`).
+
+`ctx.rtl_output_dir` is mutated in the same way the legacy
+path does (writes to `cfg.output_dir/rtl_<label>/`), so the
+runner's downstream code is completely unaffected by the
+choice of path.
+
+**Verification.**  `examples/portability_gateway_smoke.py`
+exercises the dispatch site directly.  It builds an
+`RTLChangeSet` for each of the four `cs.apply` variants
+(PRUNED, FUSED_PRUNED, HWLOOP_PRUNED, ALL) and emits twice --
+once with `cfg.use_portability=False` (legacy) and once with
+`True` (gateway).  Result on the `ud` benchmark:
+
+```
+✓ [pruned       ] legacy=120 files, portab=120 files, diffs=0
+✓ [fused_pruned ] legacy=120 files, portab=120 files, diffs=0
+✓ [hwloop_pruned] legacy=120 files, portab=120 files, diffs=0
+✓ [all          ] legacy=120 files, portab=120 files, diffs=0
+
+✓ Gateway path BYTE-EQUIVALENT to legacy on all 4 cs.apply variants
+```
+
+**Why opt-in.**  The 21-benchmark sweep uses a number of
+runner-level features (Docker GCC builds, hwloop sweeps,
+exhaustive HW selection) whose interaction with the new path
+hasn't been exhaustively re-validated end-to-end.  The
+gateway preserves every existing user's bit-for-bit output
+by default; researchers who want to try the portable path
+opt in explicitly.
 
 Each commit is independently buildable and the legacy pipeline
-remains the active path until Phase 2.8 wires in the new
-`Pipeline.run()` (gated behind `--use-portability`).
+remains the active path; `--use-portability` is the documented
+escape hatch into the new architecture.
 
 ## 11. Pointers
 

@@ -118,7 +118,9 @@ class RTLChangeSet:
             # CUSTOM_3 SETUP is R4-type → needs read port C
             if not self.prune_config.enable_regfile_rd_c:
                 self.prune_config.enable_regfile_rd_c = True
-                print("  [changeset] Conflict resolved: kept regfile read port C for HWLOOP R4-type")
+                print(
+                    "  [changeset] Conflict resolved: kept regfile read port C for HWLOOP R4-type"
+                )
 
         # ── 3. Ensure read port C is enabled if any R4-type fusions ──
         has_r4 = any(op.n_inputs >= 3 for op in self.fused_operations)
@@ -157,8 +159,34 @@ class RTLChangeSet:
             self.prune_config.hw_loop_cnt_width = self.hw_loop_cnt_width
             self.prune_config.hw_loop_addr_width = self.hw_loop_addr_width
 
+        # ── Phase 2.8 portability dispatch ──────────────────────
+        # When the user opts in (--use-portability flag, or
+        # ARVIS_USE_PORTABILITY=1 env var), route this entire
+        # apply() to the new portable Pipeline path.  Equivalence
+        # with the legacy code is verified for the five standard
+        # cv32e40p variants by examples/portability_equivalence.py
+        # (174 SystemVerilog files byte-identical for each).
+        try:
+            from arvis.targets.cv32e40p.portability_shim import (
+                emit_via_portability,
+                is_enabled as _portability_enabled,
+            )
+
+            if _portability_enabled(cfg):
+                _print_info(
+                    "[portability] routing apply() through "
+                    "targets/cv32e40p/portability_shim.emit_via_portability"
+                )
+                emit_via_portability(self, cfg, ctx, verbose=verbose)
+                return
+        except ImportError:
+            # Portability layer not available -- fall through to
+            # legacy.  This keeps the runner usable in stripped-down
+            # environments that don't ship the new packages.
+            pass
+
         # ── Step 1: Fresh copy from original RTL ──
-        label = getattr(self, "_apply_label", None)
+        label = getattr(self, '_apply_label', None)
         if label:
             ctx.rtl_output_dir = os.path.join(cfg.output_dir, f"rtl_{label}")
         else:
@@ -175,7 +203,7 @@ class RTLChangeSet:
                 text = pfb.read_text()
                 text = _re.sub(
                     r"localparam FIFO_DEPTH\s*=\s*\d+;",
-                    f"localparam FIFO_DEPTH                     = {self.prefetch_fifo_depth}; // ARVIS: auto-tuned from bottleneck analysis",  # noqa: E501
+                    f"localparam FIFO_DEPTH                     = {self.prefetch_fifo_depth}; // ARVIS: auto-tuned from bottleneck analysis",
                     text,
                 )
                 pfb.write_text(text)
@@ -200,8 +228,7 @@ class RTLChangeSet:
 
             # Build unified custom instruction registry
             from arvis.pipeline.custom_insn_registry import build_registry_from_used_instructions
-
-            gcc_result = getattr(ctx, "gcc_compile_result", None)
+            gcc_result = getattr(ctx, 'gcc_compile_result', None)
             # Only use fused slot offset when we actually have fused operations
             next_slot = gcc_result.next_r4_slot if (gcc_result and self.fused_operations) else 0
             registry = build_registry_from_used_instructions(
@@ -237,7 +264,9 @@ class RTLChangeSet:
         # ── Step 3b: Apply pragma processing (AFTER decoder gen) ──
         # Only apply feature pragmas when we have a real prune config
         # (not the minimal fusion-only config)
-        has_real_pruning = self.prune_config is not None and len(self.prune_config.removable_alu_ops) > 0
+        has_real_pruning = (
+            self.prune_config is not None and len(self.prune_config.removable_alu_ops) > 0
+        )
         self._apply_hwloop_pragmas(ws, ctx, verbose=verbose)
 
         # Replace hwloop_regs with ARVIS template when HW_LOOP > 0
@@ -249,31 +278,27 @@ class RTLChangeSet:
             if custom_hwlp.exists():
                 shutil.copy2(str(custom_hwlp), str(target_hwlp))
                 # Patch funct3 values to match dynamic encoding
-                enc = getattr(self, "_hwlp_encoding", None)
+                enc = getattr(self, '_hwlp_encoding', None)
                 if enc:
                     # Replace pragma block with correct funct3 values
                     text = target_hwlp.read_text()
                     import re as _re_hwlp
-
                     replacement = (
-                        f"  assign hwlp_we_start     = hwlp_we_i && (hwlp_funct3_i == 3'b{enc.bounds_funct3:03b} || hwlp_funct3_i == 3'b{enc.start_funct3:03b});\n"  # noqa: E501
-                        f"  assign hwlp_we_end       = hwlp_we_i && (hwlp_funct3_i == 3'b{enc.bounds_funct3:03b} || hwlp_funct3_i == 3'b{enc.end_funct3:03b});\n"  # noqa: E501
+                        f"  assign hwlp_we_start     = hwlp_we_i && (hwlp_funct3_i == 3'b{enc.bounds_funct3:03b} || hwlp_funct3_i == 3'b{enc.start_funct3:03b});\n"
+                        f"  assign hwlp_we_end       = hwlp_we_i && (hwlp_funct3_i == 3'b{enc.bounds_funct3:03b} || hwlp_funct3_i == 3'b{enc.end_funct3:03b});\n"
                         f"  assign hwlp_we_start_end = hwlp_we_i && (hwlp_funct3_i == 3'b{enc.bounds_funct3:03b});\n"
                         f"  assign hwlp_we_cnt       = hwlp_we_i && (hwlp_funct3_i == 3'b{enc.count_funct3:03b});\n"
                     )
                     text = _re_hwlp.sub(
-                        r"// ARVIS_HWLP_BEGIN: hwlp_regs_we\n.*?// ARVIS_HWLP_END: hwlp_regs_we",
-                        f"// ARVIS_HWLP_BEGIN: hwlp_regs_we\n{replacement}  // ARVIS_HWLP_END: hwlp_regs_we",
-                        text,
-                        flags=_re_hwlp.DOTALL,
+                        r'// ARVIS_HWLP_BEGIN: hwlp_regs_we\n.*?// ARVIS_HWLP_END: hwlp_regs_we',
+                        f'// ARVIS_HWLP_BEGIN: hwlp_regs_we\n{replacement}  // ARVIS_HWLP_END: hwlp_regs_we',
+                        text, flags=_re_hwlp.DOTALL
                     )
                     target_hwlp.write_text(text)
-                    _print_info(
-                        f"HWLOOP regs: bounds=f3={enc.bounds_funct3}, count=f3={enc.count_funct3}, start=f3={enc.start_funct3}, end=f3={enc.end_funct3}"  # noqa: E501
-                    )
+                    _print_info(f"HWLOOP regs: bounds=f3={enc.bounds_funct3}, count=f3={enc.count_funct3}, start=f3={enc.start_funct3}, end=f3={enc.end_funct3}")
                     # Verify
                     if f"3'b{enc.bounds_funct3:03b}" not in target_hwlp.read_text():
-                        print("  ⚠ WARNING: hwloop_regs patching FAILED")
+                        print(f"  ⚠ WARNING: hwloop_regs patching FAILED")
                 else:
                     _print_warning("HWLOOP regs: no encoding available, using template defaults")
                 _print_info("HWLOOP: replaced hwloop_regs with ARVIS template")
@@ -320,7 +345,7 @@ class RTLChangeSet:
             self._apply_dce_cleanup(ws, verbose=verbose)
 
         # ── Step 4: Apply fusion patches (also injects hwloop decoder entries) ──
-        has_hwlp = self.hw_loop_count > 0 and hasattr(self, "_custom_registry")
+        has_hwlp = self.hw_loop_count > 0 and hasattr(self, '_custom_registry')
         if self.fused_operations or has_hwlp:
             self._apply_fusion_patches(ws, ctx)
         else:
@@ -332,12 +357,12 @@ class RTLChangeSet:
 
         # ── Step 6: PC pipeline narrowing (last — operates on the final
         #           emitted tree, after pruning/decoder/fusion/encoding) ──
-        # arvis.pipeline.pc_width.patch_rtl_dir is idempotent and safe
-        # to call on any cv32e40p RTL tree. It adds
-        # ``parameter PC_WIDTH = N`` to every relevant module, narrows
-        # internal PC signals to ``[PC_WIDTH-1:0]``, and inserts
-        # zero-extends/truncations at the OBI/regfile/CSR boundaries.
-        # Only runs when explicitly requested (pc_width > 0).
+        # apply_pc_width.patch_rtl_dir is idempotent and safe to call on
+        # any cv32e40p RTL tree. It adds ``parameter PC_WIDTH = N`` to
+        # every relevant module, narrows internal PC signals to
+        # ``[PC_WIDTH-1:0]``, and inserts zero-extends/truncations at
+        # the OBI/regfile/CSR boundaries. Only runs when explicitly
+        # requested (pc_width > 0).
         if self.pc_width > 0 and self.pc_width < 32:
             try:
                 from arvis.pipeline.pc_width import patch_rtl_dir as _patch_pc
@@ -350,7 +375,8 @@ class RTLChangeSet:
 
         n_fused = len(self.fused_operations)
         has_prune = self.prune_config is not None and (
-            len(self.prune_config.removable_alu_ops) > 0 or len(self.prune_config.removable_opcode_groups) > 0
+            len(self.prune_config.removable_alu_ops) > 0
+            or len(self.prune_config.removable_opcode_groups) > 0
         )
         tag = f"{n_fused} fused ops"
         if self.hw_loop_count > 0:
@@ -362,7 +388,9 @@ class RTLChangeSet:
 
         _print_success(f"RTL changeset applied ({tag})")
 
-    def _apply_hwloop_pragmas(self, ws: "RTLWorkspace", ctx: "PipelineContext", *, verbose: bool = True) -> None:
+    def _apply_hwloop_pragmas(
+        self, ws: "RTLWorkspace", ctx: "PipelineContext", *, verbose: bool = True
+    ) -> None:
         """Process ARVIS_HWLP pragmas in the copied RTL.
 
         This runs AFTER pruning and decoder generation so that:
@@ -378,7 +406,7 @@ class RTLChangeSet:
         rtl_dir = ws.output_root / "rtl"
         hw_loop = self.hw_loop_count
 
-        proc = HWLoopPragmaProcessor(hw_loop=hw_loop, hwlp_encoding=getattr(self, "_hwlp_encoding", None))
+        proc = HWLoopPragmaProcessor(hw_loop=hw_loop, hwlp_encoding=getattr(self, '_hwlp_encoding', None))
         all_stats = proc.process_dir(rtl_dir)
 
         total_removed = sum(s.removed for s in all_stats)
@@ -445,7 +473,9 @@ class RTLChangeSet:
             mode = "KEEP" if enabled else "PRUNE"
             _print_info(f"{feature} pragmas: {', '.join(parts)} ({label}={mode})")
 
-    def _apply_debug_pragmas(self, ws: "RTLWorkspace", cfg: "ToolConfig", *, verbose: bool = True) -> None:
+    def _apply_debug_pragmas(
+        self, ws: "RTLWorkspace", cfg: "ToolConfig", *, verbose: bool = True
+    ) -> None:
         from arvis.codegen.rtl.debug_pragma import DBG_GENERATORS
 
         self._apply_feature_pragmas(
@@ -459,7 +489,9 @@ class RTLChangeSet:
             verbose=verbose,
         )
 
-    def _apply_pulp_pragmas(self, ws: "RTLWorkspace", cfg: "ToolConfig", *, verbose: bool = True) -> None:
+    def _apply_pulp_pragmas(
+        self, ws: "RTLWorkspace", cfg: "ToolConfig", *, verbose: bool = True
+    ) -> None:
         from arvis.codegen.rtl.pulp_pragma import PULP_GENERATORS
 
         corev_pulp = self.prune_config.corev_pulp if self.prune_config else 0
@@ -488,7 +520,9 @@ class RTLChangeSet:
             verbose=verbose,
         )
 
-    def _apply_ctrl_pragmas(self, ws: "RTLWorkspace", cfg: "ToolConfig", *, verbose: bool = True) -> None:
+    def _apply_ctrl_pragmas(
+        self, ws: "RTLWorkspace", cfg: "ToolConfig", *, verbose: bool = True
+    ) -> None:
         """Process ARVIS_CTRL pragmas in the controller.
 
         These are unified pragmas that receive BOTH irq and dbg flags
@@ -524,7 +558,7 @@ class RTLChangeSet:
             nonlocal total_processed
             indent = match.group(1)
             name = match.group(2)
-            match.group(3)
+            original = match.group(3)
 
             gen = CTRL_GENERATORS.get(name)
             if gen is None:
@@ -546,9 +580,13 @@ class RTLChangeSet:
             ctrl_path.write_text(new_text)
             irq_mode = "KEEP" if enable_irq else "PRUNE"
             dbg_mode = "KEEP" if enable_dbg else "PRUNE"
-            _print_info(f"CTRL pragmas: {total_processed} processed (IRQ={irq_mode}, DBG={dbg_mode})")
+            _print_info(
+                f"CTRL pragmas: {total_processed} processed (IRQ={irq_mode}, DBG={dbg_mode})"
+            )
 
-    def _apply_pulp_pragmas_on_dir(self, ws: "RTLWorkspace", cfg: "ToolConfig", target_dir: Path) -> None:
+    def _apply_pulp_pragmas_on_dir(
+        self, ws: "RTLWorkspace", cfg: "ToolConfig", target_dir: Path
+    ) -> None:
         """Process ARVIS_PULP pragmas on a specific directory (e.g. include/)."""
         from arvis.codegen.rtl.pulp_pragma import PULP_GENERATORS
         from arvis.codegen.rtl.rtl_pragma import RTLPragmaProcessor
@@ -558,10 +596,14 @@ class RTLChangeSet:
             corev_pulp = self.prune_config.corev_pulp
 
         proc = RTLPragmaProcessor()
-        proc.add_feature("PULP", enabled=(corev_pulp > 0), level=corev_pulp, generators=PULP_GENERATORS)
+        proc.add_feature(
+            "PULP", enabled=(corev_pulp > 0), level=corev_pulp, generators=PULP_GENERATORS
+        )
         proc.process_dir(target_dir)
 
-    def _apply_ctrl_pragmas_on_dir(self, ws: "RTLWorkspace", cfg: "ToolConfig", target_dir: Path) -> None:
+    def _apply_ctrl_pragmas_on_dir(
+        self, ws: "RTLWorkspace", cfg: "ToolConfig", target_dir: Path
+    ) -> None:
         """Process ARVIS_CTRL pragmas on a specific directory (e.g. include/).
 
         Uses the same CTRL generators as the controller, applied to pkg files.
@@ -629,7 +671,10 @@ class RTLChangeSet:
                 )
                 for s in all_stats:
                     if s.signals_removed:
-                        _print_info(f"  {s.file}: {len(s.signals_removed)} signals ({s.iterations} iterations)")
+                        _print_info(
+                            f"  {s.file}: {len(s.signals_removed)} signals "
+                            f"({s.iterations} iterations)"
+                        )
         except Exception as e:
             from arvis.cli import print_warning
 
@@ -684,12 +729,11 @@ class RTLChangeSet:
 
         # Write patches between pragmas
         # Inject hwloop decoder entries into the same custom opcode blocks
-        registry = getattr(self, "_custom_registry", None)
+        registry = getattr(self, '_custom_registry', None)
         if registry:
             gen._hwloop_registry_entries = registry.hwloop_instructions
             if registry.hwloop_instructions:
                 from arvis.cli import print_info
-
                 for e in registry.hwloop_instructions:
                     print_info(f"  HWLoop decoder entry: {e.name} → 0x{e.opcode:02x} f3={e.funct3} f2={e.funct2}")
         gen.write()
@@ -698,7 +742,7 @@ class RTLChangeSet:
         from arvis.codegen.rtl.fused_imm_patcher import add_fused_imm_port, needs_fused_imm
 
         # Check both op.sv_expression AND the generated ALU file for fused_imm_i
-        alu_file = ws.output_root / "rtl" / "cv32e40p_alu.sv"
+        alu_file = (ws.output_root / "rtl" / "cv32e40p_alu.sv")
         needs_imm = needs_fused_imm(self.fused_operations)
         if not needs_imm and alu_file.exists():
             needs_imm = "fused_imm_i" in alu_file.read_text()
@@ -755,7 +799,7 @@ class RTLChangeSet:
         _print_info = print_info if verbose else (lambda *a, **k: None)
 
         try:
-            from arvis.analysis.enum_usage import analyze_enum_usage
+            from analysis.enum_usage import analyze_enum_usage
             from arvis.codegen.rtl.encoding_optimizer import apply_encoding_optimization
 
             # Build forced_unused from pruning decisions.
@@ -784,7 +828,8 @@ class RTLChangeSet:
 
             if result.total_bits_saved > 0:
                 _print_info(
-                    f"Encoding optimization: {result.total_bits_saved} bits saved across {result.files_modified} files"
+                    f"Encoding optimization: {result.total_bits_saved} bits saved "
+                    f"across {result.files_modified} files"
                 )
                 for r in result.reencodings:
                     if not r.skipped and r.changes:
@@ -821,3 +866,57 @@ class RTLChangeSet:
                 flags=re.DOTALL,
             )
             fpath.write_text(text)
+
+
+def _hwloop_instruction_entries(hw_loop: int, next_r4_slot: int = 0):
+    """Create InstructionEntry objects for hwloop instructions.
+    
+    Places hwloop instructions at the next available R4 encoding slots
+    after all fused instructions, using the same opcode space.
+    """
+    from analysis.isa_db import InstructionEntry
+    from arvis.codegen.gcc.peephole_gen import _r4_enc
+
+    slot = next_r4_slot
+    
+    def _next():
+        nonlocal slot
+        opcode, funct3, funct2 = _r4_enc(slot)
+        slot += 1
+        return opcode, funct3
+
+    bounds_opc, bounds_f3 = _next()
+    count_opc, count_f3 = _next()
+
+    entries = [
+        InstructionEntry(
+            name="hwloop.bounds",
+            opcode=bounds_opc,
+            funct3=bounds_f3,
+            signals={"hwlp_we": "1'b1"},
+        ),
+        InstructionEntry(
+            name="hwloop.count",
+            opcode=count_opc,
+            funct3=count_f3,
+            signals={"hwlp_we": "1'b1", "regc_used_o": "1'b1", "regc_mux_o": "REGC_S4"},
+        ),
+    ]
+    if hw_loop > 2:
+        start_opc, start_f3 = _next()
+        end_opc, end_f3 = _next()
+        entries.extend([
+            InstructionEntry(
+                name="hwloop.start",
+                opcode=start_opc,
+                funct3=start_f3,
+                signals={"hwlp_we": "1'b1"},
+            ),
+            InstructionEntry(
+                name="hwloop.end",
+                opcode=end_opc,
+                funct3=end_f3,
+                signals={"hwlp_we": "1'b1"},
+            ),
+        ])
+    return entries, slot

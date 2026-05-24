@@ -32,7 +32,7 @@ import argparse
 import sys
 
 from arvis.config import BENCHMARKS, ToolConfig
-from arvis.toolchain import check_prerequisites
+from toolchain import check_prerequisites
 
 # ── Phase definitions ──
 # Ordered list of phase names for --until selection
@@ -100,7 +100,7 @@ def _resolve_phases(phases_arg: str) -> set:
     return expanded
 
 
-def parse_args(argv: list[str] | None = None) -> ToolConfig:
+def parse_args() -> ToolConfig:
     """Parse CLI arguments and return a resolved ToolConfig."""
     parser = argparse.ArgumentParser(
         description="CV32E40P Workload Specializer",
@@ -119,7 +119,7 @@ Hardware resource examples:
   %(prog)s --keep-rf-write-b       Keep 2nd write port (dual-ALU)
 
 Combined:
-  %(prog)s -b minimal --phases pruning --prune-rf-read-c --prune-rf-write-b
+  %(prog)s -b kyber --phases pruning --prune-rf-read-c --prune-rf-write-b
 """,
     )
 
@@ -129,7 +129,7 @@ Combined:
         "-b",
         choices=list(BENCHMARKS.keys()),
         default=None,
-        help="Select benchmark (auto-discovered from targets/benchmarks/*/benchmark.yaml).",
+        help="Select benchmark (kyber, conv2d, minimal, stress, divheavy, mulheavy)",
     )
 
     # ── Phase selection ──
@@ -199,7 +199,22 @@ Combined:
         help="GA-based HW loop optimization: genetic algorithm + greedy refinement on the 'All' solution.",
     )
 
-    args = parser.parse_args(argv)
+    # ── Phase 2.8: portability gateway ──
+    parser.add_argument(
+        "--use-portability",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL: route RTL emission through the portable "
+            "Pipeline path (targets/cv32e40p/portability_shim) "
+            "instead of the legacy RTLChangeSet.apply.  Verified "
+            "byte-equivalent on the 5 standard variants for the "
+            "ud benchmark; production adoption blocked on full "
+            "21-benchmark sweep (Phase 2.8e)."
+        ),
+    )
+
+    args = parser.parse_args()
 
     # ── Build config ──
     if args.benchmark:
@@ -237,35 +252,25 @@ Combined:
     cfg.enable_debug = args.debug
     cfg.exhaustive_hwloop = args.exhaustive or args.ga
 
+    # Phase 2.8 portability gateway: propagate the flag onto cfg
+    # AND set the env var so library code (rtl_changeset) can pick
+    # it up without a chain of cfg-passing changes.
+    cfg.use_portability = bool(args.use_portability)
+    if cfg.use_portability:
+        import os as _os
+
+        _os.environ["ARVIS_USE_PORTABILITY"] = "1"
+
     return cfg
 
 
-def _run_pipeline(argv: list[str] | None = None) -> int:
-    """Default subcommand: run the specialisation pipeline."""
-    import os
-
-    from arvis.cli import print_banner, print_error, print_info, print_metric
-    from arvis.config import BENCHMARKS, PROJECT_ROOT, _no_project_root_message
+def main():
+    from arvis.cli import print_banner, print_metric
 
     print_banner()
 
-    # Bail out early with a clear message if there is no project root to work
-    # with. argparse otherwise reports a confusing "invalid choice: 'minimal'
-    # (choose from )" because BENCHMARKS is empty.
-    if not BENCHMARKS:
-        print_error(_no_project_root_message())
-        return 2
-
-    # The pipeline expects to run from the project root because it uses
-    # workspace-relative paths (e.g. targets/benchmarks/<name>) for both
-    # inputs and the per-benchmark output directory. If the user invoked
-    # `arvis` from a subdirectory, chdir there silently.
-    if PROJECT_ROOT is not None and os.path.realpath(os.getcwd()) != os.path.realpath(PROJECT_ROOT):
-        os.chdir(PROJECT_ROOT)
-        print_info(f"Working directory set to {PROJECT_ROOT}")
-
     # ── CLI + Config ──
-    cfg = parse_args(argv)
+    cfg = parse_args()
     print_metric("Benchmark", f"{cfg.benchmark_name}")
     print_metric("Source", cfg.benchmark_dir)
     print_metric("Output", cfg.output_dir)
@@ -285,71 +290,10 @@ def _run_pipeline(argv: list[str] | None = None) -> int:
     # ── Run pipeline ──
     if cfg.is_suite:
         from arvis.pipeline.multi_runner import run_suite_pipeline
-
         run_suite_pipeline(cfg, ctx)
     else:
         from arvis.pipeline.runner import run_pipeline
-
         run_pipeline(cfg, ctx)
-    return 0
-
-
-_SUBCOMMANDS = {
-    "run": _run_pipeline,
-}
-
-
-def _print_top_level_usage() -> None:
-    print(
-        "Usage: arvis <command> [options]\n"
-        "\n"
-        "Commands:\n"
-        "  run               Run the specialisation pipeline (default).\n"
-        "  add-benchmark     Scaffold a new benchmark from the `minimal` template.\n"
-        "  check             Verify that all required external tools are installed.\n"
-        "  lint              Format and lint the codebase with ruff.\n"
-        "\n"
-        "Run `arvis <command> --help` for command-specific help.",
-        file=sys.stderr,
-    )
-
-
-def main():
-    """Dispatch entry point used by `arvis` and `python -m arvis.main`."""
-    argv = sys.argv[1:]
-
-    # Support `arvis add-benchmark <name>` and the legacy synonym
-    # `arvis add_benchmark <name>`.
-    if argv and argv[0] in ("add-benchmark", "add_benchmark"):
-        from arvis.commands.add_benchmark import main as _add_main
-
-        sys.exit(_add_main(argv[1:]))
-
-    # `arvis lint [...]`
-    if argv and argv[0] == "lint":
-        from arvis.commands.lint import main as _lint_main
-
-        sys.exit(_lint_main(argv[1:]))
-
-    # `arvis check`
-    if argv and argv[0] == "check":
-        from arvis.commands.check import main as _check_main
-
-        sys.exit(_check_main(argv[1:]))
-
-    # Explicit `arvis run ...`
-    if argv and argv[0] == "run":
-        sys.exit(_run_pipeline(argv[1:]))
-
-    # Top-level help: only when no benchmark / no flags are passed and the
-    # user explicitly asked for help (otherwise fall through to legacy mode).
-    if argv and argv[0] in ("help", "--commands"):
-        _print_top_level_usage()
-        sys.exit(0)
-
-    # Backwards-compatible default: treat all remaining arguments as
-    # `arvis run ...` flags.
-    sys.exit(_run_pipeline(argv))
 
 
 if __name__ == "__main__":

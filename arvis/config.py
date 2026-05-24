@@ -1,123 +1,231 @@
 """
-Global configuration for the ARVIS CV32E40P specialisation toolchain.
+Global configuration for the CV32E40P Workload Specialization Tool.
 
 This is the single source of truth for all configurable parameters.
-``arvis.main`` reads these and passes them to the relevant subsystems.
-
-Benchmark registry
-------------------
-Benchmarks are auto-discovered. Every directory under ``targets/benchmarks/``
-that contains a ``benchmark.yaml`` file is registered with the pipeline at
-import time. The minimum YAML schema is:
-
-    name: <benchmark_name>
-    elf: <name>_spike.elf
-    verilator_elf: <name>.elf
-    hex: <name>.hex
-
-Optional fields are passed through as-is and consumed by the pipeline:
-``trace``, ``hwloop``, ``extra_ldflags``, ``verilator_timeout_cycles``.
-
-Use ``arvis add-benchmark <name>`` to scaffold a new benchmark from the
-``minimal`` template.
+main.py reads these and passes them to the relevant subsystems.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from arvis.core_descriptor import CoreDescriptor
+    from core_descriptor import CoreDescriptor
 
-# ── Project layout discovery ──
-#
-# When ARVIS is installed as a uv tool the package lives outside the
-# repository, so we cannot derive the project root from ``__file__``.
-# Instead we walk upward from the current working directory looking for
-# the marker directory ``targets/cv32e40p`` (always part of the repo).
-# An explicit override via the ``ARVIS_PROJECT_ROOT`` environment
-# variable takes precedence.
-_PKG_DIR = Path(__file__).resolve().parent  # arvis/
+# ── Benchmark registry ──
+
+BENCHMARKS: Dict[str, Dict[str, str]] = {
+    "kyber": {
+        "dir": "targets/benchmarks/kyber512_rv32",
+        "elf": "kyber512_rv32.elf",
+        "verilator_elf": "kyber512_cv32e40p.elf",
+        "hex": "kyber512_cv32e40p.hex",
+    },
+    "conv2d": {
+        "dir": "targets/benchmarks/conv2d",
+        "elf": "conv2d_spike.elf",
+        "verilator_elf": "conv2d.elf",
+        "hex": "conv2d.hex",
+    },
+    "minimal": {
+        "dir": "targets/benchmarks/minimal",
+        "elf": "minimal_spike.elf",
+        "verilator_elf": "minimal.elf",
+        "hex": "minimal.hex",
+    },
+    "stress": {
+        "dir": "targets/benchmarks/stress",
+        "elf": "stress_spike.elf",
+        "verilator_elf": "stress.elf",
+        "hex": "stress.hex",
+    },
+    "divheavy": {
+        "dir": "targets/benchmarks/divheavy",
+        "elf": "divheavy_spike.elf",
+        "verilator_elf": "divheavy.elf",
+        "hex": "divheavy.hex",
+    },
+    "mulheavy": {
+        "dir": "targets/benchmarks/mulheavy",
+        "elf": "mulheavy_spike.elf",
+        "verilator_elf": "mulheavy.elf",
+        "hex": "mulheavy.hex",
+    },
+    "hwloop_test": {
+        "dir": "targets/benchmarks/hwloop_test",
+        "elf": "hwloop_test_spike.elf",
+        "verilator_elf": "hwloop_test.elf",
+        "hex": "hwloop_test.hex",
+        "hwloop": True,
+    },
+    "pool": {
+        "dir": "targets/benchmarks/depthwise_pool",
+        "elf": "depthwise_pool_spike.elf",
+        "verilator_elf": "depthwise_pool.elf",
+        "hex": "depthwise_pool.hex",
+    },
+    "kyber_all": {
+        "dir": "targets/benchmarks/kyber_all",
+        "elf": "kyber_all_spike.elf",
+        "verilator_elf": "kyber_all.elf",
+        "hex": "kyber_all.hex",
+    },
+    "embench": {
+        "dir": "targets/benchmarks/embench",
+        "programs": [
+            {"name": "aha-mont64",  "elf": "aha-mont64.elf",  "hex": "aha-mont64.hex",  "spike_elf": "aha-mont64_spike.elf"},
+            {"name": "crc32",       "elf": "crc32.elf",       "hex": "crc32.hex",       "spike_elf": "crc32_spike.elf"},
+            {"name": "depthconv",   "elf": "depthconv.elf",   "hex": "depthconv.hex",   "spike_elf": "depthconv_spike.elf"},
+            {"name": "edn",         "elf": "edn.elf",         "hex": "edn.hex",         "spike_elf": "edn_spike.elf"},
+            {"name": "matmult-int", "elf": "matmult-int.elf", "hex": "matmult-int.hex", "spike_elf": "matmult-int_spike.elf"},
+            {"name": "nettle-aes",  "elf": "nettle-aes.elf",  "hex": "nettle-aes.hex",  "spike_elf": "nettle-aes_spike.elf"},
+            {"name": "nsichneu",    "elf": "nsichneu.elf",    "hex": "nsichneu.hex",    "spike_elf": "nsichneu_spike.elf"},
+            {"name": "picojpeg",    "elf": "picojpeg.elf",    "hex": "picojpeg.hex",    "spike_elf": "picojpeg_spike.elf"},
+            {"name": "slre",        "elf": "slre.elf",        "hex": "slre.hex",        "spike_elf": "slre_spike.elf"},
+            {"name": "ud",          "elf": "ud.elf",          "hex": "ud.hex",          "spike_elf": "ud_spike.elf"},
+            {"name": "xgboost",     "elf": "xgboost.elf",     "hex": "xgboost.hex",     "spike_elf": "xgboost_spike.elf"},
+        ],
+    },
+    "xgboost": {
+        "dir": "targets/benchmarks/xgboost",
+        "elf": "xgboost_spike.elf",
+        "verilator_elf": "xgboost.elf",
+        "hex": "xgboost.hex",
+    },
+    "mont64": {
+        "dir": "targets/benchmarks/mont64",
+        "elf": "mont64_spike.elf",
+        "verilator_elf": "mont64.elf",
+        "hex": "mont64.hex",
+    },
+    "crc32": {
+        "dir": "targets/benchmarks/crc32",
+        "elf": "crc32_spike.elf",
+        "verilator_elf": "crc32.elf",
+        "hex": "crc32.hex",
+    },
+    "depthconv": {
+        "dir": "targets/benchmarks/depthconv",
+        "elf": "depthconv_spike.elf",
+        "verilator_elf": "depthconv.elf",
+        "hex": "depthconv.hex",
+    },
+    "edn": {
+        "dir": "targets/benchmarks/edn",
+        "elf": "edn_spike.elf",
+        "verilator_elf": "edn.elf",
+        "hex": "edn.hex",
+    },
+    "matmulint": {
+        "dir": "targets/benchmarks/matmulint",
+        "elf": "matmulint_spike.elf",
+        "verilator_elf": "matmulint.elf",
+        "hex": "matmulint.hex",
+    },
+    "md5": {
+        "dir": "targets/benchmarks/md5",
+        "elf": "md5_spike.elf",
+        "verilator_elf": "md5.elf",
+        "hex": "md5.hex",
+    },
+    "huffbench": {
+        "dir": "targets/benchmarks/huffbench",
+        "elf": "huffbench_spike.elf",
+        "verilator_elf": "huffbench.elf",
+        "hex": "huffbench.hex",
+    },
+    "nettle_aes": {
+        "dir": "targets/benchmarks/nettle_aes",
+        "elf": "nettle_aes_spike.elf",
+        "verilator_elf": "nettle_aes.elf",
+        "hex": "nettle_aes.hex",
+    },
+    "nettle_sha": {
+        "dir": "targets/benchmarks/nettle_sha",
+        "elf": "nettle_sha_spike.elf",
+        "verilator_elf": "nettle_sha.elf",
+        "hex": "nettle_sha.hex",
+    },
+    "nsichneu": {
+        "dir": "targets/benchmarks/nsichneu",
+        "elf": "nsichneu_spike.elf",
+        "verilator_elf": "nsichneu.elf",
+        "hex": "nsichneu.hex",
+    },
+    "qrduino": {
+        "dir": "targets/benchmarks/qrduino",
+        "elf": "qrduino_spike.elf",
+        "verilator_elf": "qrduino.elf",
+        "hex": "qrduino.hex",
+    },
+    "sle": {
+        "dir": "targets/benchmarks/sle",
+        "elf": "sle_spike.elf",
+        "verilator_elf": "sle.elf",
+        "hex": "sle.hex",
+    },
+    "statemate": {
+        "dir": "targets/benchmarks/statemate",
+        "elf": "statemate_spike.elf",
+        "verilator_elf": "statemate.elf",
+        "hex": "statemate.hex",
+    }, 
+    "tarfind": {
+        "dir": "targets/benchmarks/tarfind",
+        "elf": "tarfind_spike.elf",
+        "verilator_elf": "tarfind.elf",
+        "hex": "tarfind.hex",
+    },
+    "ud": {
+        "dir": "targets/benchmarks/ud",
+        "elf": "ud_spike.elf",
+        "verilator_elf": "ud.elf",
+        "hex": "ud.hex",
+    },
+    "wikisort": {
+        "dir": "targets/benchmarks/wikisort",
+        "elf": "wikisort_spike.elf",
+        "verilator_elf": "wikisort.elf",
+        "hex": "wikisort.hex",
+        "extra_ldflags": "-lgcc",
+        "verilator_timeout_cycles": 100_000_000,
+    },
+    "dilithium": {
+        "dir": "targets/benchmarks/dilithium",
+        "elf": "dilithium_spike.elf",
+        "verilator_elf": "dilithium.elf",
+        "hex": "dilithium.hex",
+        "verilator_timeout_cycles": 35_000_000,
+    },
+    "sglib": {
+        "dir": "targets/benchmarks/sglib",
+        "elf": "sglib_spike.elf",
+        "verilator_elf": "sglib.elf",
+        "hex": "sglib.hex",
+    },
+    "picojpeg": {
+        "dir": "targets/benchmarks/picojpeg",
+        "elf": "picojpeg_spike.elf",
+        "verilator_elf": "picojpeg.elf",
+        "hex": "picojpeg.hex",
+    }
+}
+
+# Auto-register each embench program as an individual benchmark
+for _p in BENCHMARKS.get("embench", {}).get("programs", []):
+    _name = f"embench_{_p['name']}"
+    if _name not in BENCHMARKS:
+        BENCHMARKS[_name] = {
+            "dir": "targets/benchmarks/embench",
+            "elf": _p.get("spike_elf", _p["elf"]),
+            "verilator_elf": _p["elf"],
+            "hex": _p["hex"],
+            "trace": f"traces/{_p['name']}_spike.log",
+        }
+
+DEFAULT_BENCHMARK = "kyber"
 RTL_ROOT = "targets/cv32e40p"
-DEFAULT_BENCHMARK = "minimal"
-_PROJECT_MARKER = "targets/cv32e40p"
-
-
-def _find_project_root() -> Optional[Path]:
-    """Return the repository root, or ``None`` if it cannot be located."""
-    override = os.environ.get("ARVIS_PROJECT_ROOT")
-    if override:
-        p = Path(override).resolve()
-        if (p / _PROJECT_MARKER).is_dir():
-            return p
-        # Fall through with a warning printed lazily on first access.
-        return p  # let downstream code surface the missing-marker error
-
-    cwd = Path.cwd().resolve()
-    for ancestor in (cwd, *cwd.parents):
-        if (ancestor / _PROJECT_MARKER).is_dir():
-            return ancestor
-
-    # Last-resort fallback for editable / development installs where
-    # the package sits under the repo root (arvis/ is a sibling of targets/).
-    pkg_parent = _PKG_DIR.parent
-    if (pkg_parent / _PROJECT_MARKER).is_dir():
-        return pkg_parent
-    return None
-
-
-PROJECT_ROOT: Optional[Path] = _find_project_root()
-BENCHMARK_ROOT: Optional[Path] = PROJECT_ROOT / "targets" / "benchmarks" if PROJECT_ROOT else None
-
-
-def _discover_benchmarks() -> Dict[str, Dict[str, Any]]:
-    """Scan targets/benchmarks/*/benchmark.yaml and build the registry."""
-    if BENCHMARK_ROOT is None or not BENCHMARK_ROOT.is_dir():
-        return {}
-    try:
-        import yaml  # type: ignore
-    except ImportError as e:
-        raise RuntimeError(
-            "PyYAML is required to load benchmark descriptors. Install it via `uv sync` or `pip install pyyaml`."
-        ) from e
-
-    registry: Dict[str, Dict[str, Any]] = {}
-    for entry in sorted(BENCHMARK_ROOT.iterdir()):
-        if not entry.is_dir():
-            continue
-        yaml_path = entry / "benchmark.yaml"
-        if not yaml_path.is_file():
-            continue
-        with yaml_path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
-        name = data.get("name", entry.name)
-        rel_dir = os.path.relpath(entry, PROJECT_ROOT)
-        bm: Dict[str, Any] = {"dir": rel_dir}
-        for k in ("elf", "verilator_elf", "hex", "trace", "hwloop", "extra_ldflags"):
-            if k in data:
-                bm[k] = data[k]
-        if "verilator_timeout_cycles" in data:
-            bm["verilator_timeout_cycles"] = int(data["verilator_timeout_cycles"])
-        registry[name] = bm
-    return registry
-
-
-BENCHMARKS: Dict[str, Dict[str, Any]] = _discover_benchmarks()
-
-
-def _no_project_root_message() -> str:
-    cwd = Path.cwd()
-    return (
-        "ARVIS could not locate the project root.\n"
-        f"  current directory: {cwd}\n"
-        f"  expected marker:   {_PROJECT_MARKER}\n"
-        "Run `arvis` from inside an ARVIS repository (the directory that "
-        "contains `targets/cv32e40p/`), or set ARVIS_PROJECT_ROOT to point "
-        "at one."
-    )
 
 
 def _is_suite(name: str) -> bool:
@@ -192,6 +300,13 @@ class ToolConfig:
     enable_debug: bool = False  # Keep RISC-V debug (JTAG) infrastructure
     exhaustive_hwloop: bool = False  # Per-loop selection: test each loop, keep only beneficial
 
+    # Phase 2.8: route RTL emission through the portable Pipeline
+    # path (targets/cv32e40p/portability_shim).  When False (the
+    # default), RTLChangeSet.apply uses its in-tree legacy
+    # emission code.  Set by ``--use-portability`` on main.py;
+    # also picked up via the ``ARVIS_USE_PORTABILITY=1`` env var.
+    use_portability: bool = False
+
     # ── Core descriptor (loaded lazily from rtl_root) ──
     _core_descriptor: Optional["CoreDescriptor"] = field(default=None, repr=False, compare=False)
 
@@ -205,15 +320,7 @@ class ToolConfig:
 
     def __post_init__(self):
         """Resolve paths from benchmark name if not explicitly set."""
-        if not BENCHMARKS:
-            raise RuntimeError(_no_project_root_message())
-        if self.benchmark_name in BENCHMARKS:
-            bm = BENCHMARKS[self.benchmark_name]
-        elif DEFAULT_BENCHMARK in BENCHMARKS:
-            bm = BENCHMARKS[DEFAULT_BENCHMARK]
-        else:
-            available = ", ".join(sorted(BENCHMARKS)) or "(none)"
-            raise ValueError(f"Unknown benchmark: {self.benchmark_name!r}. Available: {available}.")
+        bm = BENCHMARKS.get(self.benchmark_name, BENCHMARKS[DEFAULT_BENCHMARK])
         if not self.benchmark_dir:
             self.benchmark_dir = bm["dir"]
         if not self.elf_path and "elf" in bm:
@@ -232,7 +339,7 @@ class ToolConfig:
         Falls back to a hardcoded CV32E40P default if not found.
         """
         if self._core_descriptor is None:
-            from arvis.core_descriptor import CoreDescriptor
+            from core_descriptor import CoreDescriptor
 
             self._core_descriptor = CoreDescriptor.load_for_target(self.rtl_root)
         return self._core_descriptor
@@ -240,11 +347,8 @@ class ToolConfig:
     @classmethod
     def from_benchmark(cls, name: str) -> "ToolConfig":
         """Create config for a specific benchmark."""
-        if not BENCHMARKS:
-            raise RuntimeError(_no_project_root_message())
         if name not in BENCHMARKS:
-            available = ", ".join(sorted(BENCHMARKS)) or "(none)"
-            raise ValueError(f"Unknown benchmark: {name}. Available: {available}.")
+            raise ValueError(f"Unknown benchmark: {name}. Available: {list(BENCHMARKS.keys())}")
         bm = BENCHMARKS[name]
         kwargs = {"benchmark_name": name}
         if "verilator_timeout_cycles" in bm:
@@ -270,14 +374,14 @@ class ToolConfig:
         """
         import copy as _copy
         import os as _os
-
         child = _copy.copy(self)
         child.benchmark_name = prog["name"]
         child.benchmark_dir = self.benchmark_dir
         child.trace_path = f"{self.benchmark_dir}/traces/{prog['name']}_spike.log"
         # Use Spike ELF for disassembly when trace exists (PCs must match)
         spike_elf = prog.get("spike_elf", "")
-        if spike_elf and _os.path.exists(f"{self.benchmark_dir}/{spike_elf}") and _os.path.exists(child.trace_path):
+        if spike_elf and _os.path.exists(f"{self.benchmark_dir}/{spike_elf}") \
+                and _os.path.exists(child.trace_path):
             child.elf_path = f"{self.benchmark_dir}/{spike_elf}"
         else:
             child.elf_path = f"{self.benchmark_dir}/{prog['elf']}"
