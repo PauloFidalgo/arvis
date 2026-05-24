@@ -254,13 +254,12 @@ class CV32E40P(TargetCore):
     def render_prune_decision(self, decision, workspace):
         """Render a :class:`PruneDecision` to a list of patches.
 
-        Returns a single :class:`PrunePatch`.  When
-        ``decision.target_payload`` carries the legacy
-        :class:`PruneConfig` (always true for
-        :class:`UsageDrivenPruner`), the patch hands it directly to
-        the legacy :class:`RTLPruner`; otherwise the patch
-        reconstructs a minimal ``PruneConfig`` from the typed
-        Decision fields.
+        Returns a single :class:`PrunePatch`.  The patch
+        reconstructs a legacy :class:`PruneConfig` from the
+        typed Decision fields (lossless versus the original
+        ``compute_prune_config`` output) and hands it to the
+        legacy :class:`RTLPruner`.  Equivalence is verified by
+        ``examples/portability_equivalence.py``.
         """
         from arvis.targets.cv32e40p.patches import PrunePatch
 
@@ -292,3 +291,39 @@ class CV32E40P(TargetCore):
         from arvis.targets.cv32e40p.patches import LoopPatch
 
         return [LoopPatch(decision=decision)]
+
+    # ── Per-variant workspace metadata ────────────────────────────
+    def allocate_workspace_metadata(
+        self, variant, decisions_by_kind, workspace
+    ) -> None:
+        """Compute the cv32e40p custom-instruction encoding registry
+        and stash it in :attr:`workspace.metadata`.
+
+        Called once per variant emission by
+        :meth:`Pipeline._emit_variant` BEFORE any patches run.
+        Patches read the registry under
+        :data:`targets.cv32e40p.encoding.WORKSPACE_REGISTRY_KEY`
+        when they need it (FusionPatch and LoopPatch in particular
+        for the ALL variant where they share opcode space).
+        """
+        from arvis.targets.cv32e40p.encoding import (
+            allocate_for_variant,
+            WORKSPACE_REGISTRY_KEY,
+        )
+
+        # Pick the relevant decisions for this variant.  When the
+        # variant excludes a decision kind, pass None so the
+        # allocator knows to skip those slots.
+        fusion_decision = None
+        loop_decision = None
+        if variant.includes("FusionDecision"):
+            fdl = decisions_by_kind.get("FusionDecision", [])
+            if fdl:
+                fusion_decision = fdl[0]  # one decision per kind today
+        if variant.includes("LoopDecision"):
+            ldl = decisions_by_kind.get("LoopDecision", [])
+            if ldl:
+                loop_decision = ldl[0]
+
+        registry = allocate_for_variant(fusion_decision, loop_decision)
+        workspace.metadata[WORKSPACE_REGISTRY_KEY] = registry

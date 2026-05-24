@@ -113,16 +113,29 @@ class PruneDecision(Decision):
     used_instructions:
         Set of instructions actually observed in the workload — used
         by the target to leave their datapath enabled.
-    target_payload:
-        Phase 2 migration bridge.  Strategies that delegate to
-        legacy code populate this with the underlying
-        target-specific config object (e.g. the legacy
-        :class:`codegen.rtl.rtl_pruning.PruneConfig`) so the
-        target's render path can hand it directly to the legacy
-        emitter without having to re-translate from the typed
-        fields.  Phase 3 will remove this slot once all the
-        relevant data is carried in typed Decision fields.
-        Treat as opaque from outside the strategy/target pair.
+    unused_registers:
+        Registers (x0..x31 -> 0..31) that the workload never writes.
+        Used by the target to gate the register-file write enables.
+    used_regs_mask:
+        Bitmask version of :attr:`unused_registers` for direct use
+        in synthesis-parameter expressions.  Bit ``i`` set means
+        register x``i`` IS used.
+    removable_csr_labels:
+        CSR identifiers that can be pruned from the decoder.
+    removable_csr_storage:
+        CSR storage cells that can be removed (a tighter subset of
+        :attr:`removable_csr_labels` covering only those whose
+        backing storage isn't shared with another live CSR).
+    target_overlay:
+        Free-form ``{name: int}`` map for target-wide configuration
+        knobs that the target emitter reads from the prune decision
+        (e.g. ``corev_pulp``, ``fpu``, ``num_mhpmcounters``,
+        ``debug_trigger_en``).  These are not "decisions" in the
+        strict sense -- they're target capabilities the strategy
+        observed and propagated.  Kept here so the prune
+        decision is round-trip-lossless versus the legacy
+        :class:`PruneConfig` without needing a separate
+        :class:`Decision` type.
     """
 
     removable_alu_ops: FrozenSet[str] = field(default_factory=frozenset)
@@ -130,13 +143,15 @@ class PruneDecision(Decision):
     removable_opcode_groups: FrozenSet[str] = field(default_factory=frozenset)
     feature_flags: Dict[str, bool] = field(default_factory=dict)
     used_instructions: FrozenSet[str] = field(default_factory=frozenset)
-    target_payload: Optional[Any] = None
+    unused_registers: Tuple[int, ...] = field(default_factory=tuple)
+    used_regs_mask: int = 0xFFFFFFFF
+    removable_csr_labels: FrozenSet[str] = field(default_factory=frozenset)
+    removable_csr_storage: FrozenSet[str] = field(default_factory=frozenset)
+    target_overlay: Dict[str, int] = field(default_factory=dict)
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
-        # Phase 1: rendering is still done by the legacy
-        # RTLChangeSet.apply path. Subsequent commits move the logic
-        # into TargetCore.render_decision so this becomes:
-        #   return target.render_prune_decision(self)
+        # Concrete targets override TargetCore.render_prune_decision
+        # to translate this into RTLPatches.  Default: no patches.
         return []
 
 
@@ -157,10 +172,6 @@ class FusionDecision(Decision):
     fused_ops:
         Ordered list of fused operations.  Order matters because
         opcode slots are filled deterministically.
-    target_payload:
-        Phase 2 migration bridge -- mirrors :attr:`PruneDecision.target_payload`.
-        For :class:`NGramFusion` this carries the legacy fusion
-        registry / encoding info needed by the cv32e40p RTL emitter.
     """
 
     # We use a tuple rather than a Python list because Decision is
@@ -168,7 +179,6 @@ class FusionDecision(Decision):
     # carries them as-is via the existing dataclass; Phase 3 will
     # define a target-agnostic FusedOp type.
     fused_ops: Tuple[Any, ...] = field(default_factory=tuple)
-    target_payload: Optional[Any] = None
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
         return []
@@ -191,17 +201,12 @@ class LoopDecision(Decision):
     patched_loops:
         Opaque records describing which loops were patched.  Used
         by the assembler-level patcher and by reports.
-    target_payload:
-        Phase 2 migration bridge -- mirrors :attr:`PruneDecision.target_payload`.
-        Populated by :class:`CV32E40PHWLoop` with the legacy
-        encoding / registry data needed by the cv32e40p RTL emitter.
     """
 
     nest_depth: int = 0
     counter_width: int = 32
     addr_width: int = 32
     patched_loops: Tuple[Any, ...] = field(default_factory=tuple)
-    target_payload: Optional[Any] = None
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
         return []

@@ -173,10 +173,13 @@ class UsageDrivenPruner(PruningStrategy):
         """Translate the legacy :class:`PruneConfig` value object
         into the typed :class:`PruneDecision`.
 
-        The legacy config uses ``set`` for collections and Python
-        booleans for flags; the new decision uses ``frozenset`` and
-        a ``dict`` for forwards-compat with future strategies that
-        want richer feature toggles.
+        The translation is round-trip-lossless: every field the
+        legacy :class:`RTLPruner` reads from the config is carried
+        on the decision, either as a typed field or in
+        ``feature_flags`` / ``target_overlay``.  The cv32e40p
+        emitter reconstructs an equivalent ``PruneConfig`` from
+        these fields when applying patches; equivalence is verified
+        by ``examples/portability_equivalence.py``.
         """
         removable_alu_ops = frozenset(getattr(prune_config, "removable_alu_ops", set()))
         removable_mul_modes = frozenset(
@@ -184,6 +187,12 @@ class UsageDrivenPruner(PruningStrategy):
         )
         removable_opcode_groups = frozenset(
             getattr(prune_config, "removable_opcode_groups", set())
+        )
+        removable_csr_labels = frozenset(
+            getattr(prune_config, "removable_csr_labels", set())
+        )
+        removable_csr_storage = frozenset(
+            getattr(prune_config, "removable_csr_storage", set())
         )
 
         # Collect all enable_* flags into a dict.  This is forward-
@@ -196,11 +205,37 @@ class UsageDrivenPruner(PruningStrategy):
                 if isinstance(value, bool):
                     feature_flags[attr] = value
 
+        # Target-wide configuration knobs (capabilities the
+        # strategy observed and propagates).
+        target_overlay = {}
+        for attr in (
+            "corev_pulp",
+            "fpu",
+            "num_mhpmcounters",
+            "debug_trigger_en",
+            "hw_loop",
+            "hw_loop_cnt_width",
+            "hw_loop_addr_width",
+        ):
+            value = getattr(prune_config, attr, None)
+            if isinstance(value, int):
+                target_overlay[attr] = value
+
+        # Register-level analysis.
+        unused_registers = tuple(
+            sorted(getattr(prune_config, "unused_registers", []))
+        )
+        used_regs_mask = int(getattr(prune_config, "used_regs_mask", 0xFFFFFFFF))
+
         return PruneDecision(
             removable_alu_ops=removable_alu_ops,
             removable_mul_modes=removable_mul_modes,
             removable_opcode_groups=removable_opcode_groups,
             feature_flags=feature_flags,
             used_instructions=frozenset(used_instructions),
-            target_payload=prune_config,
+            unused_registers=unused_registers,
+            used_regs_mask=used_regs_mask,
+            removable_csr_labels=removable_csr_labels,
+            removable_csr_storage=removable_csr_storage,
+            target_overlay=target_overlay,
         )

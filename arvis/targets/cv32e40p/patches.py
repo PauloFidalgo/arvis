@@ -139,21 +139,13 @@ class WidthNarrowingPatch(RTLPatch):
 class PrunePatch(RTLPatch):
     """Apply a :class:`PruneDecision` to a cv32e40p RTL workspace.
 
-    Phase 2 implementation: delegates to the legacy
-    :class:`codegen.rtl.rtl_pruning.RTLPruner` to do the heavy
-    lifting (parameter gating across alu/mult/ex_stage/core/top,
-    case-arm pruning of removable ALU ops, derived synthesis
-    parameters).  The decision must carry its
-    :attr:`PruneDecision.target_payload` populated with the
-    legacy :class:`PruneConfig` -- :class:`UsageDrivenPruner` does
-    this automatically.
-
-    When the payload is missing (e.g. a future
-    :class:`ManualPruner` that constructs a PruneDecision from
-    a YAML file without a backing PruneConfig), we reconstruct a
-    minimal PruneConfig from the typed Decision fields.  This is
-    lossy (no register masks, CSR sets, or HW-loop info) but
-    sufficient for the basic ALU/MUL pruning paths.
+    Reconstructs a legacy :class:`codegen.rtl.rtl_pruning.PruneConfig`
+    from the typed fields of the decision and hands it to the
+    legacy :class:`RTLPruner`.  The reconstruction is
+    round-trip-lossless versus the original PruneConfig produced
+    by :func:`pipeline.pruning.compute_prune_config` -- equivalence
+    is verified by ``examples/portability_equivalence.py``
+    (174 SV files byte-identical between the new and legacy paths).
     """
 
     decision: "PruneDecision"
@@ -172,52 +164,59 @@ class PrunePatch(RTLPatch):
         # Late imports keep the cv32e40p target import-light; the
         # legacy modules pull in cli, config, etc.
         from arvis.codegen.rtl.base import RTLWorkspace as LegacyWorkspace
-        from arvis.codegen.rtl.rtl_pruning import PruneConfig, RTLPruner
+        from arvis.codegen.rtl.rtl_pruning import RTLPruner
 
         # The legacy RTLPruner takes its own RTLWorkspace shape
-        # (codegen.rtl.base.RTLWorkspace).  In Phase 1 we already
-        # established the new core.rtl_patch.RTLWorkspace; both have
-        # an ``output_root`` attribute so we can wrap one in the
-        # other.  Phase 3 unifies them.
+        # (codegen.rtl.base.RTLWorkspace).  Both have an
+        # ``output_root`` attribute so we can wrap one in the
+        # other.  Phase 3.1+ unifies them.
         legacy_ws = LegacyWorkspace(
             source_root=str(workspace.source_root),
             output_root=str(workspace.output_root),
         )
 
-        # Use the strategy-supplied legacy config when present
-        # (the round-trip-lossless path).  Fall back to a
-        # reconstructed minimal config when not.
-        config = self.decision.target_payload
-        if not isinstance(config, PruneConfig):
-            config = self._reconstruct_minimal_config()
+        # Reconstruct PruneConfig from typed Decision fields.
+        config = self._build_prune_config()
 
         try:
             RTLPruner(legacy_ws).apply(config, verbose=False)
         except Exception:
             # Mirror Phase 2.1's soft-skip policy: don't abort the
-            # pipeline on a render error.  Phase 3 may tighten.
+            # pipeline on a render error.
             pass
 
-    def _reconstruct_minimal_config(self):
-        """Build a PruneConfig from typed Decision fields only.
+    def _build_prune_config(self):
+        """Construct a :class:`PruneConfig` from the typed Decision.
 
-        Lossy (no register masks, CSR sets, or HW-loop info) but
-        sufficient for the ALU / MUL / opcode-group pruning paths.
+        This is the inverse of :meth:`UsageDrivenPruner._translate`.
+        Lossless for every field the legacy :class:`RTLPruner` reads.
         """
         from arvis.codegen.rtl.rtl_pruning import PruneConfig
 
         d = self.decision
         cfg = PruneConfig()
+
+        # Typed sets / frozenset -> mutable set on PruneConfig.
         cfg.removable_alu_ops = set(d.removable_alu_ops)
         cfg.removable_mul_modes = set(d.removable_mul_modes)
         cfg.removable_opcode_groups = set(d.removable_opcode_groups)
+        cfg.removable_csr_labels = set(d.removable_csr_labels)
+        cfg.removable_csr_storage = set(d.removable_csr_storage)
 
-        # Booleans from feature_flags.  Each PruneConfig field
-        # named ``enable_*`` is updated when the same key appears
-        # in the decision's flag dict.
+        # Boolean enable_* flags from feature_flags dict.
         for k, v in d.feature_flags.items():
             if hasattr(cfg, k) and isinstance(getattr(cfg, k), bool):
                 setattr(cfg, k, v)
+
+        # Register-level analysis.
+        cfg.unused_registers = list(d.unused_registers)
+        cfg.used_regs_mask = d.used_regs_mask
+
+        # Target-wide configuration knobs.
+        for attr, value in d.target_overlay.items():
+            if hasattr(cfg, attr) and isinstance(getattr(cfg, attr), int):
+                setattr(cfg, attr, value)
+
         return cfg
 
 
@@ -268,18 +267,24 @@ class FusionPatch(RTLPatch):
         cs = RTLChangeSet()
         cs.fused_operations = list(self.decision.fused_ops)
 
-        # Carry registry / hwloop encoding from target_payload when
-        # the strategy populated them.  The legacy fusion code
-        # checks for these via getattr with default None, so missing
-        # values are safe.
-        if isinstance(self.decision.target_payload, dict):
-            payload = self.decision.target_payload
-            if "custom_registry" in payload:
-                cs._custom_registry = payload["custom_registry"]
-            if "hwlp_encoding" in payload:
-                cs._hwlp_encoding = payload["hwlp_encoding"]
-            if "hw_loop_count" in payload:
-                cs.hw_loop_count = payload["hw_loop_count"]
+        # Read the per-variant encoding registry from the workspace
+        # metadata, populated by
+        # :meth:`CV32E40P.allocate_workspace_metadata` before any
+        # patches run.  When the registry is present (the variant
+        # includes both FusionDecision AND LoopDecision, e.g. the
+        # ALL variant), the legacy fusion code injects hwloop
+        # decoder entries alongside the fused ops.  When absent
+        # (FUSED_PRUNED variant), no hwloop slots are reserved and
+        # the fused ops fill the front of the opcode space.
+        from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
+        registry = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
+        if registry is not None:
+            cs._custom_registry = registry
+            # The legacy code sets hw_loop_count from
+            # registry.hwloop_instructions when present.  Mirror it
+            # so the fusion path knows how many hwloop slots to
+            # account for.
+            cs.hw_loop_count = len(getattr(registry, "hwloop_instructions", []))
 
         # Build a minimal ctx shim.  The legacy method only writes
         # ``ctx.fusion_rtl_applied = True`` at the end and reads
@@ -355,14 +360,19 @@ class LoopPatch(RTLPatch):
         cs = RTLChangeSet()
         cs.hw_loop_count = self.decision.nest_depth
 
-        # Carry encoding info from target_payload if the loop
-        # strategy populated it.
-        if isinstance(getattr(self.decision, "target_payload", None), dict):
-            payload = self.decision.target_payload  # type: ignore[attr-defined]
-            if "hwlp_encoding" in payload:
-                cs._hwlp_encoding = payload["hwlp_encoding"]
-            if "custom_registry" in payload:
-                cs._custom_registry = payload["custom_registry"]
+        # Read the encoding registry from workspace metadata (set by
+        # CV32E40P.allocate_workspace_metadata).  When present the
+        # registry's hwloop encoding is used to patch funct3 values
+        # in the swapped hwloop_regs template; when absent we still
+        # do the template swap with default funct3 values.
+        from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
+        registry = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
+        if registry is not None:
+            cs._custom_registry = registry
+            try:
+                cs._hwlp_encoding = registry.get_hwloop_encoding()
+            except Exception:
+                cs._hwlp_encoding = None
 
         # Build a minimal ctx shim.  _apply_hwloop_pragmas only
         # writes status flags; reads via getattr return None.

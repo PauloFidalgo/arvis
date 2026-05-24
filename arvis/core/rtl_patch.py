@@ -36,11 +36,21 @@ class RTLWorkspace:
 
     The workspace also offers a small file I/O API so that patches
     don't need to know the absolute path of the workspace root.
+
+    Patches in the same variant emission may need to share state
+    (e.g. a custom-instruction encoding registry computed once and
+    consumed by both the fusion and hwloop renderings).
+    :attr:`metadata` is a mutable per-workspace dict for exactly
+    that: the pipeline populates it before applying patches, and
+    patches read it via well-known string keys.  Cross-workspace
+    leakage is impossible because each variant gets a fresh
+    workspace instance.
     """
 
     def __init__(self, source_root: Path, output_root: Path):
         self.source_root = Path(source_root)
         self.output_root = Path(output_root)
+        self.metadata: dict = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────
     def copy_fresh(self) -> None:

@@ -302,6 +302,13 @@ class Pipeline:
         )
         workspace.copy_fresh()
 
+        # Compute per-variant shared state (e.g. encoding registry
+        # for cv32e40p).  The target decides what shared state it
+        # needs; this is its hook into the variant emission flow.
+        # For targets that don't need it, the default no-op below
+        # leaves workspace.metadata untouched.
+        self._populate_workspace_metadata(variant, decisions_by_kind, workspace)
+
         # Patch ordering matters: prune first (strips datapaths the
         # specialized decoder no longer needs), then fusion (adds new
         # decoder cases on the surviving ALU), then loop (operates on
@@ -331,6 +338,33 @@ class Pipeline:
             sim_result=sim_result,
             synth_result=synth_result,
         )
+
+    def _populate_workspace_metadata(
+        self,
+        variant: VariantConfig,
+        decisions_by_kind: Dict[str, list],
+        workspace,
+    ) -> None:
+        """Hook for the target to compute per-variant shared state.
+
+        Called once per variant emission, before any patches run.
+        The default implementation looks for an
+        ``allocate_workspace_metadata`` method on the target; if
+        present, the target gets to populate
+        :attr:`workspace.metadata` with whatever the patches in
+        this variant will need.
+
+        Targets without per-variant shared state (e.g. simple cores
+        with no encoding allocator) need not override.
+        """
+        hook = getattr(self.target, "allocate_workspace_metadata", None)
+        if hook is None:
+            return
+        try:
+            hook(variant, decisions_by_kind, workspace)
+        except Exception:
+            # Mirror the strategy/patch error policy: don't abort.
+            pass
 
     def _output_root_for_workload(self, workload: "Workload") -> "Path":
         """Where this pipeline writes per-variant directories.

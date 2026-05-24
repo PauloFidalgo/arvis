@@ -51,46 +51,10 @@ from arvis.core.verifier import Verifier, SimResult
 from arvis.targets import CV32E40P
 from arvis.targets.cv32e40p.variants import PRUNED
 from arvis.strategies.pruning import UsageDrivenPruner
+from arvis.workloads import BenchmarkWorkload
 
 
-# ─── Minimal Workload / Toolchain / Verifier (Phase 1 shim style) ─
-
-
-class StaticWorkload(Workload):
-    def __init__(self, name: str, bench_dir: Path) -> None:
-        self._name = name
-        self._bench_dir = bench_dir
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def sources(self):
-        return []
-
-    @property
-    def cflags(self):
-        return []
-
-    @property
-    def build_recipe(self) -> BuildRecipe:
-        return BuildRecipe()
-
-    @property
-    def expected(self) -> ExpectedResult:
-        return ExpectedResult()
-
-    def profile(self, toolchain: Toolchain) -> WorkloadProfile:
-        excluded = ("spike", ".baseline", "_baseline_")
-        elfs = tuple(
-            sorted(
-                p
-                for p in self._bench_dir.glob("*.elf")
-                if not any(s in p.name for s in excluded)
-            )
-        )
-        return WorkloadProfile(elf_paths=elfs)
+# ─── Minimal Toolchain + Verifier (Phase 1 shim style) ────────────
 
 
 class NullToolchain(Toolchain):
@@ -148,20 +112,25 @@ def run_legacy_pruned(target: CV32E40P, decision, output_dir: Path) -> Path:
     rtl_dir = output_dir / "rtl_legacy_pruned"
     ws = LegacyWS(source_root=str(target.rtl_root), output_root=str(rtl_dir))
 
-    # The PrunePatch uses the legacy PruneConfig from
-    # decision.target_payload when present (UsageDrivenPruner
-    # always populates it).  For the legacy run we feed the same
-    # config directly to RTLPruner.
-    config = decision.target_payload
-    if not isinstance(config, PruneConfig):
-        # Reconstruct minimal config (mirrors PrunePatch fallback).
-        config = PruneConfig()
-        config.removable_alu_ops = set(decision.removable_alu_ops)
-        config.removable_mul_modes = set(decision.removable_mul_modes)
-        config.removable_opcode_groups = set(decision.removable_opcode_groups)
-        for k, v in decision.feature_flags.items():
-            if hasattr(config, k) and isinstance(getattr(config, k), bool):
-                setattr(config, k, v)
+    # Construct the legacy PruneConfig from the typed Decision
+    # fields.  The translation is the inverse of
+    # UsageDrivenPruner._translate -- exactly the same construction
+    # PrunePatch.apply uses internally, so this test compares the
+    # legacy emitter run via two equivalent paths.
+    config = PruneConfig()
+    config.removable_alu_ops = set(decision.removable_alu_ops)
+    config.removable_mul_modes = set(decision.removable_mul_modes)
+    config.removable_opcode_groups = set(decision.removable_opcode_groups)
+    config.removable_csr_labels = set(decision.removable_csr_labels)
+    config.removable_csr_storage = set(decision.removable_csr_storage)
+    for k, v in decision.feature_flags.items():
+        if hasattr(config, k) and isinstance(getattr(config, k), bool):
+            setattr(config, k, v)
+    config.unused_registers = list(decision.unused_registers)
+    config.used_regs_mask = decision.used_regs_mask
+    for attr, value in decision.target_overlay.items():
+        if hasattr(config, attr) and isinstance(getattr(config, attr), int):
+            setattr(config, attr, value)
 
     # Match the new path's workspace setup.  Legacy
     # RTLWorkspace uses ``.copy()`` rather than ``.copy_fresh()``.
@@ -174,7 +143,7 @@ def run_legacy_pruned(target: CV32E40P, decision, output_dir: Path) -> Path:
     return rtl_dir
 
 
-def run_new_pruned(target: CV32E40P, workload: StaticWorkload, tmp_root: Path) -> Path:
+def run_new_pruned(target: CV32E40P, workload: BenchmarkWorkload, tmp_root: Path) -> Path:
     """Apply the same PruneDecision via the new Pipeline.run."""
     pipeline = Pipeline(
         target=target,
@@ -213,7 +182,7 @@ def main() -> int:
         print(f"  (ud not present — falling back to {bench_dir.name})")
 
     target = CV32E40P()
-    workload = StaticWorkload(name=bench_dir.name, bench_dir=bench_dir)
+    workload = BenchmarkWorkload(bench_dir=bench_dir)
 
     print(f"Equivalence test: PRUNED variant on workload={workload.name}")
     print()

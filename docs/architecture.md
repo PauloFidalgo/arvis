@@ -319,27 +319,44 @@ Decisions are immutable; patches operate on a workspace that's
 freshly copied from the target's `rtl_root` per variant. There is
 no shared mutable state between variants.
 
-## 8. The `target_payload` migration bridge
+## 8. Decision data model (typed fields, no opaque bridge)
 
-`PruneDecision`, `FusionDecision`, and `LoopDecision` carry a
-field `target_payload: Optional[Any]`. This is a Phase 2 migration
-slot: strategies that delegate to legacy code populate it with
-the underlying target-specific data, and the corresponding patch
-classes hand it back to the legacy emitter.
+The four decision dataclasses (`PruneDecision`, `FusionDecision`,
+`LoopDecision`, `WidthDecision`) carry exclusively **typed**
+fields. Earlier drafts of the migration used an `Optional[Any]`
+`target_payload` slot to ferry legacy data through the strategy
+→ patch boundary; that bridge is closed.
 
-This is documented as a temporary leak. Phase 3 closes it by
-splitting the data carried in `target_payload` into typed Decision
-fields (or sibling Decision types). At that point the field is
-removed.
+`PruneDecision` in particular carries the full set of fields the
+cv32e40p emitter needs:
 
-For now the bridge is acceptable because:
+- `removable_alu_ops: FrozenSet[str]`
+- `removable_mul_modes: FrozenSet[str]`
+- `removable_opcode_groups: FrozenSet[str]`
+- `feature_flags: Dict[str, bool]` — every `enable_*` toggle
+- `used_instructions: FrozenSet[str]`
+- `unused_registers: Tuple[int, ...]`
+- `used_regs_mask: int`
+- `removable_csr_labels: FrozenSet[str]`
+- `removable_csr_storage: FrozenSet[str]`
+- `target_overlay: Dict[str, int]` — target capability counts
+  (`corev_pulp`, `fpu`, `num_mhpmcounters`, etc.) the strategy
+  observed and propagates
 
-- It is named and documented (no surprises).
-- It is opaque from outside the strategy/target pair (can't be
-  abused by other code).
-- Removing it requires rewriting the legacy emitter rather than
-  the abstraction layer; this is appropriate for an incremental
-  migration.
+Translation between the legacy `PruneConfig` (mutable, attribute-
+heavy) and the new `PruneDecision` (frozen, typed) is performed
+in two symmetric places:
+
+- `strategies.pruning.usage_driven.UsageDrivenPruner._translate`
+  — `PruneConfig` → `PruneDecision`.
+- `targets.cv32e40p.patches.PrunePatch._build_prune_config`
+  — `PruneDecision` → `PruneConfig`.
+
+The pair is round-trip-lossless versus the legacy
+`compute_prune_config` output. Equivalence is verified by
+`examples/portability_equivalence.py`: all 174 SV files in the
+PRUNED variant's RTL workspace are byte-identical between the
+legacy `RTLPruner` path and the new `Pipeline.run()` path.
 
 ## 9. Equivalence-test discipline
 
@@ -368,7 +385,8 @@ The portability layer was introduced incrementally:
 | **1.1–1.7** | `daf82a9..83697d8` | `core/` abstractions; concrete strategies and target; `Pipeline.run()` in decisions-only mode. |
 | **2.1–2.4** | `8d6b3e2..0820409` | Real `RTLPatch` implementations for each Decision type. |
 | **2.5–2.7** | `5d32664..1af0adb` | Standard variant configs; per-variant emission; equivalence test for `PRUNED`. |
-| **3** | (in progress) | Doc, test suite, full equivalence, eliminate `target_payload`, replace legacy `runner.py`. |
+| **3** | committed | Doc, test suite, full equivalence, typed-field migration (target_payload removed), partial codegen factoring. |
+| **3 (in progress)** | next | Encoding allocator extraction; FUSED_PRUNED / HWLOOP_PRUNED / ALL equivalence; runner.py replacement (gated). |
 
 Each commit is independently buildable and the legacy pipeline
 remains the active path until Phase 2.8 wires in the new

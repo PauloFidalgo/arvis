@@ -35,6 +35,7 @@ from arvis.core import (
 )
 from arvis.core.verifier import Verifier, SimResult
 from arvis.targets import CV32E40P
+from arvis.workloads import BenchmarkWorkload
 from arvis.strategies.fusion import NGramFusion
 from arvis.strategies.hwloop import CV32E40PHWLoop
 from arvis.strategies.pruning import UsageDrivenPruner
@@ -45,63 +46,9 @@ from arvis.strategies.width import (
 )
 
 
-# ─── Minimal Workload + Toolchain + Verifier impls ────────────────
+# ─── Minimal Toolchain + Verifier impls ────────────────────────────
 # These let us exercise Pipeline.run() without needing the full
-# Phase 2 toolchain abstractions in place yet.  They wrap the
-# existing artifacts in ``targets/benchmarks/<name>/`` for the
-# benchmark we're smoke-testing on.
-
-
-class StaticWorkload(Workload):
-    """A workload whose ELFs are pre-built and just listed.
-
-    Useful for smoke-testing the strategies against existing
-    artifacts in ``targets/benchmarks/<bm>/`` without invoking the
-    toolchain.  Phase 2 introduces a real ``Workload`` subclass
-    that drives the build via ``Toolchain``.
-    """
-
-    def __init__(self, name: str, bench_dir: Path) -> None:
-        self._name = name
-        self._bench_dir = bench_dir
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def sources(self) -> List[Path]:
-        return list(self._bench_dir.glob("*.c")) + list(self._bench_dir.glob("*.s"))
-
-    @property
-    def cflags(self) -> List[str]:
-        return ["-O2"]
-
-    @property
-    def build_recipe(self) -> BuildRecipe:
-        return BuildRecipe(working_dir=self._bench_dir)
-
-    @property
-    def expected(self) -> ExpectedResult:
-        return ExpectedResult()
-
-    def profile(self, toolchain: Toolchain) -> WorkloadProfile:
-        # Phase 1 smoke-test profile: collect every ELF the
-        # benchmark directory ships, EXCLUDING:
-        # - spike ELFs (built for the ISA simulator with a much
-        #   larger memory layout; they'd skew width analyses).
-        # - .baseline alternates (snapshots from earlier builds).
-        # Phase 2's real Workload.profile will know precisely
-        # which ELFs are in-scope from the build recipe.
-        excluded_substrings = ("spike", ".baseline", "_baseline_")
-        elfs = tuple(
-            sorted(
-                p
-                for p in self._bench_dir.glob("*.elf")
-                if not any(s in p.name for s in excluded_substrings)
-            )
-        )
-        return WorkloadProfile(elf_paths=elfs)
+# Phase 2 toolchain abstractions in place yet.
 
 
 class NullToolchain(Toolchain):
@@ -150,10 +97,9 @@ def main() -> int:
     bench_root = repo_root / "targets" / "benchmarks"
     bench_dir = bench_root / "ud"
     if not bench_dir.exists():
-        # Fall back to whatever benchmark is available.  arvis-public
-        # ships only a minimal benchmark; full ud is in the private
-        # tree.  Pick the first directory that contains at least one
-        # ELF so the smoke test has something concrete to chew on.
+        # Fall back to whatever benchmark is available.  Useful when
+        # the smoke test runs in a public-tree clone that doesn't
+        # ship the full benchmark set.
         candidates = [
             d for d in bench_root.iterdir() if d.is_dir() and any(d.glob("*.elf"))
         ] if bench_root.exists() else []
@@ -171,7 +117,7 @@ def main() -> int:
         print(f"  (ud not present — falling back to {bench_dir.name})")
 
     target = CV32E40P()
-    workload = StaticWorkload(name="ud", bench_dir=bench_dir)
+    workload = BenchmarkWorkload(bench_dir=bench_dir)
     toolchain = NullToolchain()
     verifier = NullVerifier()
 
