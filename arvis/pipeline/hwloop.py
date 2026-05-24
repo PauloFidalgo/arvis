@@ -1405,6 +1405,17 @@ def _run_generic_hwloop(
     ctx.hwloop_elf_path = best.fused_elf
     ctx.hwloop_only_hex_path = best.plain_hex
     ctx.hwloop_only_elf_path = best.plain_elf
+    # Save the original fused-only paths (before they get overwritten with
+    # the fused+hwloop binary).  Pruning for the FUSED_PRUNED variant
+    # needs to analyse the fused-only binary -- not the fused+hwloop one
+    # -- because the FUSED_PRUNED RTL+binary combo is what runs at sim
+    # time.  If we forget the fused-only path here, pruning may strip an
+    # instruction that's only present in fused-only code (e.g., a plain
+    # `xor` left outside a fusion that became a hwloop body in the
+    # fused+hwloop binary), causing the FUSED_PRUNED simulator to trap.
+    if ctx.fused_elf_path and not getattr(ctx, "fused_only_elf_path", None):
+        ctx.fused_only_elf_path = ctx.fused_elf_path
+        ctx.fused_only_hex_path = ctx.fused_hex_path
     ctx.fused_hex_path = best.fused_hex or ctx.fused_hex_path
     ctx.fused_elf_path = best.fused_elf or ctx.fused_elf_path
 

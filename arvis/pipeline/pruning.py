@@ -85,20 +85,54 @@ def compute_prune_config(
     fused_ops = getattr(ctx, "_rtl_changeset_fused_ops", None) or []
     mult_fused_ops = [op for op in fused_ops if getattr(op, "execution_unit", "") == "mult"]
     if mult_fused_ops:
-        # Any mult fusion implies the basic 32x32 MAC HW must stay.
+        # Determine, per fused op, which multiplier datapath it actually
+        # uses so we keep ONLY the modes that are needed (no over-kept
+        # area).  Mapping (see ``classify_mult_pattern`` and
+        # ``pipeline.fusion_rtl._classify_mult_op``):
+        #   pattern        opcode emitted        datapath used
+        #   "mac"          MUL_MAC32             MAC32
+        #   "msu"          MUL_MSU32             MSU32
+        #   "mac_shift"    MUL_FUSED_<name>      MAC32 (+ post-shift)
+        #   "mul_post_sub" MUL_FUSED_<name>      MSU32 (+ operand swap)
+        #   "pre_compute"  MUL_FUSED_<name>      MAC32 (+ input steering)
+        _MAC_PATTERNS = {"mac", "mac_shift", "pre_compute"}
+        _MSU_PATTERNS = {"msu", "mul_post_sub"}
+        used_mac = any(getattr(op, "mult_pattern", "") in _MAC_PATTERNS
+                       for op in mult_fused_ops)
+        used_msu = any(getattr(op, "mult_pattern", "") in _MSU_PATTERNS
+                       for op in mult_fused_ops)
+
+        # The basic 32x32 multiplier HW is needed for any mult fusion.
         prune_config.enable_mul = True
-        # MSU path needed only when at least one fused op reuses MSU32.
-        if any(getattr(op, "mult_pattern", "") == "msu" for op in mult_fused_ops):
+        # MSU enable flag controls whether the MSU subtraction logic is
+        # synthesised in cv32e40p_mult.sv -- only enable if a fused op
+        # actually wants it.
+        if used_msu:
             prune_config.enable_msu = True
         # The DSP-unfriendly fusions are filtered upstream, so no fused
         # op needs the DOT8/DOT16 datapath.  Keep it pruned.
         prune_config.enable_dot_mul = False
-        if "MUL_MSU32" in prune_config.removable_mul_modes:
+
+        # Remove from the removable list ONLY the modes that are
+        # actually used by the surviving fused mult ops.  This keeps the
+        # area savings for benchmarks that only use one of the two
+        # datapaths (e.g. crc32 has only mac, kyber has only msu, etc.).
+        # Without this, the downstream RTL pruning will strip the
+        # corresponding `case` arm out of cv32e40p_mult.sv while the
+        # fused decoder still asks for that operator -> the multiplier
+        # idles and the program hangs.
+        if used_mac and "MUL_MAC32" in prune_config.removable_mul_modes:
+            prune_config.removable_mul_modes = prune_config.removable_mul_modes - {"MUL_MAC32"}
+        if used_msu and "MUL_MSU32" in prune_config.removable_mul_modes:
             prune_config.removable_mul_modes = prune_config.removable_mul_modes - {"MUL_MSU32"}
         _print(
             f"  Fused mult ops keep enable_mul={prune_config.enable_mul}, "
             f"enable_msu={prune_config.enable_msu}, "
             f"enable_dot_mul={prune_config.enable_dot_mul}"
+        )
+        _print(
+            f"  Fused mult datapaths used: "
+            f"MAC32={used_mac}, MSU32={used_msu}"
         )
 
     # Apply CLI hardware resource overrides

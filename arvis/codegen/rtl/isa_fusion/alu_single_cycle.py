@@ -252,7 +252,21 @@ def is_dsp_unfriendly_mul_fusion(mnemonics: Tuple[str, ...]) -> bool:
     # register-form ``add`` or ``sub``.  Anything else (immediate-form
     # add/sub, shift, bitwise, compare, ...) requires extra logic on
     # the DSP path.
-    other = norm[0] if norm[1] == "mul" else norm[1]
+    #
+    # We further restrict to mul-FIRST patterns only.  The RTL decoder
+    # (cv32e40p_decoder.sv) only implements ``mul+add`` (MUL_MAC32) and
+    # ``mul+sub`` (MUL_MSU32) under OPCODE_CUSTOM_0.  The reverse-order
+    # variants ``add+mul`` and ``sub+mul`` would mathematically fold into
+    # the same MAC/MSU paths but require an extra operand-mux on the
+    # multiplier critical path, hurting FPGA Fmax.  We chose to keep
+    # only the mul-first variants in the RTL; if GCC still produces
+    # mul-second fusions, the simulator hits ``illegal_insn`` and traps.
+    # Reject mul-second patterns here so the GCC combine pass never
+    # emits them.
+    if norm[1] == "mul":
+        return True
+    # mul-first: allow only add/sub as the second mnemonic.
+    other = norm[1]
     return other not in ("add", "sub")
 
 
@@ -1133,6 +1147,22 @@ class RTLGenerator:
             # The decoder sets mult_int_en + mult_operator_o so the
             # ex_stage muxes mult_result to the write-back port.
             # alu_en must be 0 to prevent the ALU from running in parallel.
+            #
+            # The mac/msu/mul_post_sub patterns are inherently 3-register
+            # operations:
+            #   mac:          rd = rs1 * rs2 + rs3      (3 reads)
+            #   msu:          rd = rs3 - (rs1 * rs2)    (3 reads)
+            #   mul_post_sub: rd = (rs1 * rs2) - rs3    (3 reads)
+            # We MUST emit regb_used / regc_used / regc_mux=REGC_S4 for
+            # them regardless of what `op.n_inputs` says.  Earlier
+            # codegen paths sometimes inherit a wrong n_inputs (e.g.
+            # 1) from upstream liveness analysis, which would cause the
+            # decoder to leave operand_b/c at zero -> the multiplier
+            # silently computes a*0+0 = 0.
+            mult_3reg_patterns = {"mac", "msu", "mul_post_sub"}
+            mult_pat = getattr(op, "mult_pattern", "") or ""
+            needs_3_reads = mult_pat in mult_3reg_patterns or op.n_inputs >= 3
+
             signals = [
                 f"{indent}alu_en         = 1'b0;",
                 f"{indent}mult_int_en    = 1'b1;",
@@ -1140,13 +1170,13 @@ class RTLGenerator:
                 f"{indent}regfile_alu_we = 1'b1;",
                 f"{indent}rega_used_o    = 1'b1;",
             ]
-            if op.n_inputs >= 2:
+            if op.n_inputs >= 2 or needs_3_reads:
                 signals.append(f"{indent}regb_used_o    = 1'b1;")
             imm_enc_mult = getattr(op, "imm_encoding", {})
             is_parametric_mult = bool(imm_enc_mult)
             if is_parametric_mult:
                 signals.append(f"{indent}fused_imm_o    = {{instr_rdata_i[24:20], instr_rdata_i[31:27]}};")
-            elif op.n_inputs >= 3:
+            elif needs_3_reads:
                 signals.append(f"{indent}regc_used_o    = 1'b1;")
                 signals.append(f"{indent}regc_mux_o     = REGC_S4;")
             return signals

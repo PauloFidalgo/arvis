@@ -31,7 +31,20 @@ fi
 # 5. Rebuild cc1 and xgcc (driver)
 cd /toolchain/build-gcc-newlib-stage1/gcc
 make -j$(nproc) cc1 xgcc 2>&1 | tail -5
-cp cc1 /opt/riscv/libexec/gcc/riscv32-unknown-elf/15.2.0/cc1
+# Detect the installed GCC version directory (avoids hardcoding 15.2.0
+# vs 16.1.0 vs whatever the base image happens to ship with).
+CC1_DIR=$(dirname "$(find /opt/riscv/libexec/gcc/riscv32-unknown-elf -maxdepth 2 -name cc1 -type f 2>/dev/null | head -1)")
+if [ -z "$CC1_DIR" ]; then
+    # Fallback: take the first version dir under libexec
+    CC1_DIR=$(find /opt/riscv/libexec/gcc/riscv32-unknown-elf -maxdepth 1 -mindepth 1 -type d | head -1)
+fi
+if [ -z "$CC1_DIR" ] || [ ! -d "$CC1_DIR" ]; then
+    echo "ERROR: cannot find target cc1 directory under /opt/riscv/libexec/gcc/riscv32-unknown-elf/"
+    ls -la /opt/riscv/libexec/gcc/riscv32-unknown-elf/ 2>&1
+    exit 1
+fi
+echo "Installing cc1 to $CC1_DIR"
+cp cc1 "$CC1_DIR/cc1"
 cp xgcc /opt/riscv/bin/riscv32-unknown-elf-gcc
 
 # 6. Rebuild fused_pass.so against the new cc1's plugin API
@@ -48,4 +61,4 @@ if [ -f /toolchain/fused_pass.c ]; then
 fi
 
 echo "=== Verify ==="
-/opt/riscv/libexec/gcc/riscv32-unknown-elf/15.2.0/cc1 --help=target 2>&1 | grep hwloop
+"$CC1_DIR/cc1" --help=target 2>&1 | grep hwloop

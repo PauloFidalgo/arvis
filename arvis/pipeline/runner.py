@@ -255,6 +255,15 @@ def _run_pruning(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> tuple:
         saved_fused_elf = ctx.fused_elf_path
         saved_fused_hex = ctx.fused_hex_path
 
+        # If hwloop ran, ctx.fused_elf_path points at the fused+hwloop
+        # binary, but the FUSED_PRUNED variant runs the fused-ONLY binary.
+        # Use the saved fused-only path for the FUSED prune config so we
+        # don't mark instructions removable that are only present in
+        # fused-only code (e.g. a plain `xor` outside fusion that becomes
+        # a hwloop body when hwloop is active).
+        fused_only_elf = getattr(ctx, "fused_only_elf_path", None)
+        fused_only_hex = getattr(ctx, "fused_only_hex_path", None)
+
         # Step 2 prune config: based on original baseline binary
         ctx.fused_elf_path = None
         ctx.fused_hex_path = None
@@ -270,11 +279,23 @@ def _run_pruning(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> tuple:
         else:
             prune_config_hwonly, all_used_hwonly = prune_config_baseline, all_used_baseline
 
+        # Use the fused-only binary for the FUSED prune config when
+        # available, otherwise fall back to whatever was saved (which may
+        # be the fused+hwloop binary if hwloop didn't separate them).
+        if fused_only_elf and os.path.exists(str(fused_only_elf)):
+            ctx.fused_elf_path = str(fused_only_elf)
+            ctx.fused_hex_path = str(fused_only_hex) if fused_only_hex else saved_fused_hex
+            print_info("Computing prune config for FUSED binary (step 3+, fused-only)...")
+        else:
+            ctx.fused_elf_path = saved_fused_elf
+            ctx.fused_hex_path = saved_fused_hex
+            print_info("Computing prune config for FUSED binary (step 3+)...")
+
+        prune_config_fused, all_used_fused = compute_prune_config(cfg, ctx)
+        # Restore so downstream consumers see the binary that actually
+        # runs after hwloop merging.
         ctx.fused_elf_path = saved_fused_elf
         ctx.fused_hex_path = saved_fused_hex
-
-        print_info("Computing prune config for FUSED binary (step 3+)...")
-        prune_config_fused, all_used_fused = compute_prune_config(cfg, ctx)
         changeset.add_prune_config(prune_config_fused, all_used_fused)
         return prune_config_baseline, all_used_baseline, prune_config_hwonly, all_used_hwonly
     else:
