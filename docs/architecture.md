@@ -388,7 +388,8 @@ The portability layer was introduced incrementally:
 | **2.7b** | `28d72a2` | Equivalence test extended to all 5 variants (residual diffs: 0/2/2/4/4). |
 | **2.7c** | `e7f6551` | Three load-bearing fixes drove residual diffs to **0/0/0/0/0** byte-identical. |
 | **3** | committed | Doc, test suite, typed-field migration (target_payload removed), partial codegen factoring. |
-| **2.8** | this | `--use-portability` flag wires `RTLChangeSet.apply` to the portable path; gateway smoke shows byte-equivalence on all 4 cs.apply variants. |
+| **2.8** | `cc33db3` | `--use-portability` flag wires `RTLChangeSet.apply` to the portable path; gateway smoke shows byte-equivalence on all 4 cs.apply variants. |
+| **3.2 + 3.3** | `7456fad` | All 12 ``RTLChangeSet._apply_*`` private methods promoted to pure free functions in ``targets/cv32e40p/passes.py`` -- the target package is now self-contained. |
 
 ### Phase 2.8: the portability gateway
 
@@ -447,7 +448,89 @@ Each commit is independently buildable and the legacy pipeline
 remains the active path; `--use-portability` is the documented
 escape hatch into the new architecture.
 
-## 11. Pointers
+## 11. Code organisation: passes vs patches vs strategies
+
+After Phase 3.2/3.3 the cv32e40p target package is laid out as
+three concentric layers, each with a clear responsibility.
+
+```
+strategies/                      (target-AGNOSTIC analysis)
+   ↓ produces
+core/strategy.py: Decision       (typed analysis result)
+   ↓ rendered into
+targets/cv32e40p/patches.py      (target-SPECIFIC orchestration)
+   ↓ which call
+targets/cv32e40p/passes.py       (target-SPECIFIC primitive ops)
+   ↓ which delegate to
+codegen/rtl/                     (low-level RTL manipulation lib)
+```
+
+| Layer | Lives in | Responsibility | Talks to |
+|---|---|---|---|
+| **Strategies** | `strategies/` | Pure analysis: read a workload + a target, return a typed `Decision`.  No RTL mutation. | `Workload`, `TargetCore` (read-only) |
+| **Decisions** | `core/strategy.py` | Plain dataclasses.  YAML-friendly.  No methods that mutate state. | – |
+| **Patches** | `targets/cv32e40p/patches.py` | Translate one `Decision` into a sequence of RTL mutations on an `RTLWorkspace`.  Orchestrate ordering. | Passes; `RTLWorkspace`; `workspace.metadata` |
+| **Passes** | `targets/cv32e40p/passes.py` | Pure free functions, each performing one well-named pass on the workspace (e.g. `apply_hwloop_pragmas`). | `codegen/rtl/`; `RTLWorkspace` |
+| **Codegen library** | `codegen/rtl/` | Low-level pragma processing, decoder generation, DCE.  Target-aware (file paths) but reusable across cv32e40p forks. | Filesystem |
+
+Why this split matters
+----------------------
+
+* **Strategies are testable in isolation.**  No filesystem, no
+  workspace; just a workload and a target descriptor.
+* **Decisions are serialisable.**  A workload's analysis output
+  can be cached as a pickle/YAML file and replayed on a
+  re-emission without rerunning the strategies.
+* **Patches encode "what" not "how".**  When we ship the cv32e40p
+  target out of the repo, all the orchestration is in one
+  package.  No reaching back into `RTLChangeSet` private methods.
+* **Passes are the unit of reuse.**  Every legacy `cs._apply_*`
+  method is now a free function that takes only its actual
+  inputs.  Any caller (legacy `RTLChangeSet`, `PrunePatch`,
+  `LoopPatch`, `FusionPatch`, future targets that fork
+  cv32e40p) calls the pass directly with explicit kwargs.
+
+Adding a new pass
+-----------------
+
+When you discover a new RTL transformation you need:
+
+1. Write a free function in
+   `targets/cv32e40p/passes.py` with keyword-only arguments
+   for everything it reads.  Add a docstring with parameters,
+   returns, and idempotency notes.
+2. Add it to `__all__` and write at least one contract test
+   in `tests/portability/test_passes.py` (importability,
+   no-op safety, idempotency).
+3. Call it from the appropriate `RTLPatch.apply` in
+   `targets/cv32e40p/patches.py`.
+4. If the legacy `RTLChangeSet` should also use it, add a
+   thin shim in `pipeline/rtl_changeset.py` that translates
+   from the changeset's untyped state.
+
+What still lives in `codegen/rtl/`
+----------------------------------
+
+`codegen/rtl/` retains the low-level RTL manipulation primitives:
+
+* `rtl_pragma.py`    -- generic ARVIS_FOO pragma block parser
+* `hwloop_pragma.py` -- hwloop-specific pragma generators
+* `pulp_pragma.py` / `irq_pragma.py` / `ctrl_pragma.py` /
+  `debug_pragma.py` -- feature-specific generators
+* `rtl_pruning.py`   -- decoder regen + opcode-block stripping
+* `pyslang_dce.py`   -- pyslang-based dead-code elimination
+* `encoding_optimizer.py` -- enum-width reduction
+* `isa_fusion/`      -- fused-instruction RTL generator
+* `fused_imm_patcher.py` / `adder_reuse_patcher.py` /
+  `mult_reuse_patcher.py` -- post-fusion port wiring
+
+These contain cv32e40p-specific knowledge (file paths, ALU enum
+names, controller FSM state names) but are reusable across cv32e40p
+forks.  A non-cv32e40p target would need to reimplement these
+primitives, then write its own `passes.py` that wraps them.
+
+
+## 12. Pointers
 
 - **Add a new pruning strategy**: see `strategies/pruning/usage_driven.py`,
   subclass `PruningStrategy`, return `PruneDecision`. Compose into a

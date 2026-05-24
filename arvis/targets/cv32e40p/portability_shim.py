@@ -71,29 +71,37 @@ def _build_prune_decision(cs: "RTLChangeSet") -> PruneDecision | None:
     if pc is None:
         return None
 
-    # Build a minimal feature_flags dict capturing the boolean
-    # gates the legacy code reads back at apply time.  We only
-    # snapshot known flags; unknown enable_* / prune_* attrs are
-    # left to PrunePatch's reconstruction defaults.
+    # Collect ``enable_*`` boolean flags exactly the way
+    # :class:`UsageDrivenPruner` does -- this is the canonical
+    # source of truth for what gets carried in
+    # :attr:`PruneDecision.feature_flags`.  ``prune_*`` flags
+    # do NOT belong here; they're target-private knobs read by
+    # the legacy code only.
     feature_flags: Dict[str, bool] = {}
     for attr in dir(pc):
-        if attr.startswith(("enable_", "prune_")) and isinstance(
-            getattr(pc, attr, None), bool
-        ):
-            feature_flags[attr] = getattr(pc, attr)
+        if attr.startswith("enable_") and not attr.startswith("_"):
+            value = getattr(pc, attr, None)
+            if isinstance(value, bool):
+                feature_flags[attr] = value
 
-    # target_overlay carries the integer-valued, non-flag fields
-    # PruneConfig holds (e.g. hw_loop, hw_loop_cnt_width, etc.).
+    # ``target_overlay`` carries the integer-valued, non-flag
+    # fields PruneConfig holds (corev_pulp, fpu, hw_loop_*, ...).
+    # The set of attributes mirrors UsageDrivenPruner's
+    # canonical list.
     target_overlay: Dict[str, Any] = {}
     for attr in (
+        "corev_pulp",
+        "fpu",
+        "num_mhpmcounters",
+        "debug_trigger_en",
         "hw_loop",
         "hw_loop_cnt_width",
         "hw_loop_addr_width",
         "pc_width",
     ):
-        val = getattr(pc, attr, None)
-        if isinstance(val, int):
-            target_overlay[attr] = val
+        value = getattr(pc, attr, None)
+        if isinstance(value, int):
+            target_overlay[attr] = value
 
     return PruneDecision(
         removable_alu_ops=tuple(sorted(pc.removable_alu_ops)),
@@ -262,6 +270,15 @@ def emit_via_portability(
         decisions.get("LoopDecision").nest_depth
         if "LoopDecision" in decisions
         else 0
+    )
+
+    # Propagate the CLI-level ``enable_debug`` knob.  PrunePatch
+    # reads this when invoking the debug/ctrl pragma processors;
+    # see the "Flag derivation note" in PrunePatch.apply.  When
+    # ``cfg`` doesn't carry the attribute we default to True
+    # (the canonical "keep debug" stance).
+    workspace.metadata["cv32e40p_enable_debug"] = bool(
+        getattr(cfg, "enable_debug", True)
     )
 
     # ── 7. Run patches in canonical order ────────────────────────

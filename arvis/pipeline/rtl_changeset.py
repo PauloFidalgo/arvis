@@ -393,21 +393,27 @@ class RTLChangeSet:
     ) -> None:
         """Process ARVIS_HWLP pragmas in the copied RTL.
 
+        Thin shim around
+        :func:`targets.cv32e40p.passes.apply_hwloop_pragmas`; kept
+        for backwards compatibility with downstream call sites that
+        still hold an :class:`RTLChangeSet` reference.
+
         This runs AFTER pruning and decoder generation so that:
           - PULP hwloop artifacts are stripped (hw_loop=0)
           - Our custom hwloop is inserted (hw_loop>0)
           - The decoder already has ARVIS_FUSED pragmas ready
         """
-        from arvis.cli import print_info
-        from arvis.codegen.rtl.hwloop_pragma import HWLoopPragmaProcessor
+        from arvis.cli import print_info, print_warning
+        from arvis.targets.cv32e40p.passes import apply_hwloop_pragmas
 
         _print_info = print_info if verbose else (lambda *a, **k: None)
 
-        rtl_dir = ws.output_root / "rtl"
-        hw_loop = self.hw_loop_count
-
-        proc = HWLoopPragmaProcessor(hw_loop=hw_loop, hwlp_encoding=getattr(self, '_hwlp_encoding', None))
-        all_stats = proc.process_dir(rtl_dir)
+        all_stats = apply_hwloop_pragmas(
+            ws,
+            hw_loop_count=self.hw_loop_count,
+            hwlp_encoding=getattr(self, "_hwlp_encoding", None),
+            verbose=verbose,
+        )
 
         total_removed = sum(s.removed for s in all_stats)
         total_kept = sum(s.kept for s in all_stats)
@@ -421,13 +427,12 @@ class RTLChangeSet:
                 parts.append(f"{total_kept} kept")
             if total_replaced:
                 parts.append(f"{total_replaced} replaced")
-            _print_info(f"HWLOOP pragmas: {', '.join(parts)} (HW_LOOP={hw_loop})")
+            _print_info(
+                f"HWLOOP pragmas: {', '.join(parts)} (HW_LOOP={self.hw_loop_count})"
+            )
 
-        # Log any unknown pragmas
         for s in all_stats:
             if s.unknown:
-                from arvis.cli import print_warning
-
                 print_warning(f"Unknown HWLP pragmas in {s.file}: {s.unknown}")
 
     def _apply_feature_pragmas(
@@ -442,21 +447,24 @@ class RTLChangeSet:
         extra_dirs: list | None = None,
         verbose: bool = True,
     ) -> None:
-        """Process ARVIS pragmas for a single feature (DBG, PULP, IRQ, etc.)."""
+        """Process ARVIS pragmas for a single feature (DBG, PULP, IRQ, etc.).
+
+        Thin shim around
+        :func:`targets.cv32e40p.passes.apply_feature_pragmas`.
+        """
         from arvis.cli import print_info
-        from arvis.codegen.rtl.rtl_pragma import RTLPragmaProcessor
+        from arvis.targets.cv32e40p.passes import apply_feature_pragmas
 
         _print_info = print_info if verbose else (lambda *a, **k: None)
 
-        rtl_dir = ws.output_root / "rtl"
-        proc = RTLPragmaProcessor()
-        proc.add_feature(feature, enabled=enabled, level=level, generators=generators)
-        all_stats = proc.process_dir(rtl_dir)
-
-        for sub in extra_dirs or []:
-            d = ws.output_root / sub
-            if d.exists():
-                all_stats.extend(proc.process_dir(d))
+        all_stats = apply_feature_pragmas(
+            ws,
+            feature=feature,
+            enabled=enabled,
+            level=level,
+            generators=generators,
+            extra_dirs=extra_dirs,
+        )
 
         total_removed = sum(s.removed for s in all_stats)
         total_kept = sum(s.kept for s in all_stats)
@@ -525,163 +533,103 @@ class RTLChangeSet:
     ) -> None:
         """Process ARVIS_CTRL pragmas in the controller.
 
-        These are unified pragmas that receive BOTH irq and dbg flags
-        to generate the correct RTL for the combination.
+        Thin shim around :func:`targets.cv32e40p.passes.apply_ctrl_pragmas`.
         """
-        import re
-
         from arvis.cli import print_info
+        from arvis.targets.cv32e40p.passes import apply_ctrl_pragmas
 
         _print_info = print_info if verbose else (lambda *a, **k: None)
-        from arvis.codegen.rtl.ctrl_pragma import CTRL_GENERATORS
 
-        rtl_dir = ws.output_root / "rtl"
-        ctrl_path = rtl_dir / "cv32e40p_controller.sv"
-        if not ctrl_path.exists():
-            return
+        enable_irq = (
+            self.prune_config.enable_interrupts
+            if self.prune_config is not None
+            else True
+        )
+        enable_dbg = bool(getattr(cfg, "enable_debug", False))
 
-        enable_irq = True
-        enable_dbg = cfg.enable_debug
-        if self.prune_config is not None:
-            enable_irq = self.prune_config.enable_interrupts
-
-        text = ctrl_path.read_text()
-        total_processed = 0
-
-        # Process ARVIS_CTRL_BEGIN/END blocks
-        pattern = re.compile(
-            r"(\s*)// ARVIS_CTRL_BEGIN: (\w+)\n(.*?)// ARVIS_CTRL_END: \2",
-            re.DOTALL,
+        n = apply_ctrl_pragmas(
+            ws,
+            enable_interrupts=enable_irq,
+            enable_debug=enable_dbg,
         )
 
-        def replacer(match):
-            nonlocal total_processed
-            indent = match.group(1)
-            name = match.group(2)
-            original = match.group(3)
-
-            gen = CTRL_GENERATORS.get(name)
-            if gen is None:
-                return match.group(0)  # Unknown, keep
-
-            result = gen(enable_irq, enable_dbg, indent)
-            total_processed += 1
-
-            if result is None:
-                return match.group(0)  # Keep original
-            if result == "":
-                return ""  # Remove entire block
-            # Replace with generated content
-            return f"{indent}{result.rstrip()}\n"
-
-        new_text = pattern.sub(replacer, text)
-
-        if new_text != text:
-            ctrl_path.write_text(new_text)
+        if n > 0:
             irq_mode = "KEEP" if enable_irq else "PRUNE"
             dbg_mode = "KEEP" if enable_dbg else "PRUNE"
             _print_info(
-                f"CTRL pragmas: {total_processed} processed (IRQ={irq_mode}, DBG={dbg_mode})"
+                f"CTRL pragmas: {n} processed (IRQ={irq_mode}, DBG={dbg_mode})"
             )
 
     def _apply_pulp_pragmas_on_dir(
         self, ws: "RTLWorkspace", cfg: "ToolConfig", target_dir: Path
     ) -> None:
-        """Process ARVIS_PULP pragmas on a specific directory (e.g. include/)."""
-        from arvis.codegen.rtl.pulp_pragma import PULP_GENERATORS
-        from arvis.codegen.rtl.rtl_pragma import RTLPragmaProcessor
+        """Process ARVIS_PULP pragmas on a specific directory (e.g. include/).
 
-        corev_pulp = 0
-        if self.prune_config is not None:
-            corev_pulp = self.prune_config.corev_pulp
+        Thin shim around :func:`targets.cv32e40p.passes.apply_pulp_pragmas_on_dir`.
+        """
+        from arvis.targets.cv32e40p.passes import apply_pulp_pragmas_on_dir
 
-        proc = RTLPragmaProcessor()
-        proc.add_feature(
-            "PULP", enabled=(corev_pulp > 0), level=corev_pulp, generators=PULP_GENERATORS
+        corev_pulp = (
+            self.prune_config.corev_pulp if self.prune_config is not None else 0
         )
-        proc.process_dir(target_dir)
+        apply_pulp_pragmas_on_dir(ws, target_dir, corev_pulp=corev_pulp)
 
     def _apply_ctrl_pragmas_on_dir(
         self, ws: "RTLWorkspace", cfg: "ToolConfig", target_dir: Path
     ) -> None:
         """Process ARVIS_CTRL pragmas on a specific directory (e.g. include/).
 
-        Uses the same CTRL generators as the controller, applied to pkg files.
+        Thin shim around :func:`targets.cv32e40p.passes.apply_ctrl_pragmas_on_dir`.
         """
-        import re
+        from arvis.targets.cv32e40p.passes import apply_ctrl_pragmas_on_dir
 
-        from arvis.codegen.rtl.ctrl_pragma import CTRL_GENERATORS
-
-        enable_irq = True
-        enable_dbg = cfg.enable_debug
-        if self.prune_config is not None:
-            enable_irq = self.prune_config.enable_interrupts
-
-        for sv_file in sorted(target_dir.glob("*.sv")):
-            text = sv_file.read_text()
-            original = text
-
-            pattern = re.compile(
-                r"(\s*)// ARVIS_CTRL_BEGIN: (\w+)\n(.*?)// ARVIS_CTRL_END: \2",
-                re.DOTALL,
-            )
-
-            def replacer(match):
-                indent = match.group(1)
-                name = match.group(2)
-                gen = CTRL_GENERATORS.get(name)
-                if gen is None:
-                    return match.group(0)
-                result = gen(enable_irq, enable_dbg, indent)
-                if result is None:
-                    return match.group(0)
-                if result == "":
-                    return ""
-                return f"{indent}{result.rstrip()}\n"
-
-            text = pattern.sub(replacer, text)
-            if text != original:
-                sv_file.write_text(text)
+        enable_irq = (
+            self.prune_config.enable_interrupts
+            if self.prune_config is not None
+            else True
+        )
+        enable_dbg = bool(getattr(cfg, "enable_debug", False))
+        apply_ctrl_pragmas_on_dir(
+            ws,
+            target_dir,
+            enable_interrupts=enable_irq,
+            enable_debug=enable_dbg,
+        )
 
     def _apply_dce_cleanup(self, ws: "RTLWorkspace", *, verbose: bool = True) -> None:
         """Run dead code elimination cleanup on processed RTL.
 
-        After all pruning passes (parameters, pragmas, case removal),
-        scan for orphaned signal declarations and assignments that are
-        no longer referenced. Remove them iteratively.
+        Thin shim around :func:`targets.cv32e40p.passes.apply_dce_cleanup`.
         """
         from arvis.cli import print_info
+        from arvis.targets.cv32e40p.passes import apply_dce_cleanup
 
         _print_info = print_info if verbose else (lambda *a, **k: None)
 
-        rtl_dir = ws.output_root / "rtl"
+        all_stats = apply_dce_cleanup(ws)
 
-        try:
-            from arvis.codegen.rtl.pyslang_dce import run_dce_on_directory
+        total_signals = sum(len(s.signals_removed) for s in all_stats)
+        total_lines = sum(s.lines_removed for s in all_stats)
 
-            all_stats = run_dce_on_directory(rtl_dir)
-
-            total_signals = sum(len(s.signals_removed) for s in all_stats)
-            total_lines = sum(s.lines_removed for s in all_stats)
-
-            if total_signals > 0:
-                _print_info(
-                    f"DCE cleanup: removed {total_signals} dead signals, "
-                    f"{total_lines} lines across {len(all_stats)} files"
-                )
-                for s in all_stats:
-                    if s.signals_removed:
-                        _print_info(
-                            f"  {s.file}: {len(s.signals_removed)} signals "
-                            f"({s.iterations} iterations)"
-                        )
-        except Exception as e:
-            from arvis.cli import print_warning
-
-            print_warning(f"DCE cleanup skipped: {e}")
+        if total_signals > 0:
+            _print_info(
+                f"DCE cleanup: removed {total_signals} dead signals, "
+                f"{total_lines} lines across {len(all_stats)} files"
+            )
+            for s in all_stats:
+                if s.signals_removed:
+                    _print_info(
+                        f"  {s.file}: {len(s.signals_removed)} signals "
+                        f"({s.iterations} iterations)"
+                    )
 
     def _apply_fusion_patches(self, ws: "RTLWorkspace", ctx: "PipelineContext") -> None:
         """Insert fused instruction RTL into the (already pruned) workspace.
+
+        Thin shim around
+        :func:`targets.cv32e40p.passes.apply_fusion_patches`; kept
+        for backwards compatibility with downstream call sites that
+        still pass an :class:`RTLChangeSet`.
 
         Patches between ARVIS_FUSED_BEGIN/END pragmas in:
           - cv32e40p_pkg.sv (ALU enum entries)
@@ -693,97 +641,25 @@ class RTLChangeSet:
           - SVA assertion disable (CUSTOM_0 legality)
           - ALU_OP_WIDTH expansion (if enum values > 127)
         """
-        from arvis.codegen.rtl.isa_fusion.alu_single_cycle import RTLGenerator
+        from arvis.targets.cv32e40p.passes import apply_fusion_patches
 
-        rtl_dir = ws.output_root / "rtl"
+        def _on_applied():
+            ctx.fusion_rtl_applied = True
 
-        # Verify pragma files exist
-        pkg_path = rtl_dir / "include" / "cv32e40p_pkg.sv"
-        dec_path = rtl_dir / "cv32e40p_decoder.sv"
-        alu_path = rtl_dir / "cv32e40p_alu.sv"
-
-        for path, name in [
-            (pkg_path, "pkg"),
-            (dec_path, "decoder"),
-            (alu_path, "alu"),
-        ]:
-            if not path.exists():
-                print(f"  ❌ {name} file not found: {path}")
-                return
-
-        # Clear any existing pragma content (from previous runs)
-        self._clear_fused_pragmas(rtl_dir)
-
-        # Create generator and register all operations
-        gen = RTLGenerator(str(rtl_dir))
-        gen.add_existing()  # Parse baseline ALU values (non-fused)
-
-        # Deduplicate ops by name before registering
-        seen_names = set()
-        for op in self.fused_operations:
-            if op.name in seen_names:
-                continue
-            seen_names.add(op.name)
-            gen.fused_ops.append(op)
-            gen.allocator.register(op)
-
-        # Write patches between pragmas
-        # Inject hwloop decoder entries into the same custom opcode blocks
-        registry = getattr(self, '_custom_registry', None)
-        if registry:
-            gen._hwloop_registry_entries = registry.hwloop_instructions
-            if registry.hwloop_instructions:
-                from arvis.cli import print_info
-                for e in registry.hwloop_instructions:
-                    print_info(f"  HWLoop decoder entry: {e.name} → 0x{e.opcode:02x} f3={e.funct3} f2={e.funct2}")
-        gen.write()
-
-        # ── Post-fusion fix 1: fused_imm_i port ──
-        from arvis.codegen.rtl.fused_imm_patcher import add_fused_imm_port, needs_fused_imm
-
-        # Check both op.sv_expression AND the generated ALU file for fused_imm_i
-        alu_file = (ws.output_root / "rtl" / "cv32e40p_alu.sv")
-        needs_imm = needs_fused_imm(self.fused_operations)
-        if not needs_imm and alu_file.exists():
-            needs_imm = "fused_imm_i" in alu_file.read_text()
-        if needs_imm:
-            add_fused_imm_port(str(rtl_dir), imm_width=10)
-
-        # ── Post-fusion fix 2: Adder reuse wiring ──
-        from arvis.codegen.rtl.adder_reuse_patcher import add_adder_reuse_wiring, needs_adder_reuse
-
-        if needs_adder_reuse(self.fused_operations):
-            steering_sv = gen.generate_alu_adder_steering()
-            add_adder_reuse_wiring(str(rtl_dir), steering_sv)
-
-        # ── Post-fusion fix 2b: Mult pre-compute input steering ──
-        from arvis.codegen.rtl.mult_reuse_patcher import (
-            _get_pre_compute_ops,
-            add_mult_pre_compute_wiring,
-            generate_mult_steering,
-            needs_mult_pre_compute,
+        apply_fusion_patches(
+            ws,
+            fused_operations=self.fused_operations,
+            registry=getattr(self, "_custom_registry", None),
+            hwlp_encoding=getattr(self, "_hwlp_encoding", None),
+            hw_loop_count=self.hw_loop_count,
+            fusion_applied_callback=_on_applied,
         )
-
-        if needs_mult_pre_compute(self.fused_operations):
-            pre_ops = _get_pre_compute_ops(self.fused_operations)
-            steering_sv = generate_mult_steering(pre_ops)
-            add_mult_pre_compute_wiring(str(rtl_dir), steering_sv)
-
-        # ── Post-fusion fix 3: Disable CUSTOM_0 SVA assertion ──
-        from arvis.codegen.rtl.fusion_patches import disable_custom0_sva
-
-        disable_custom0_sva(rtl_dir)
-
-        # ── Post-fusion fix 4: Update ALU_OP_WIDTH if needed ──
-        from arvis.codegen.rtl.fusion_patches import update_alu_op_width
-
-        update_alu_op_width(rtl_dir, gen)
-
-        # Update context
-        ctx.fusion_rtl_applied = True
 
     def _apply_encoding_optimization(self, ws: "RTLWorkspace", *, verbose: bool = True) -> None:
         """Optimize enum encodings by removing unused members and reducing bit widths.
+
+        Thin shim around
+        :func:`targets.cv32e40p.passes.apply_encoding_optimization`.
 
         This runs AFTER all pruning, pragma processing, DCE, and fusion so
         it can scan the final RTL to determine which enum members survived.
@@ -795,77 +671,48 @@ class RTLChangeSet:
           - mult_state_e: remove unused multiplier states, reduce width
         """
         from arvis.cli import print_info
+        from arvis.targets.cv32e40p.passes import apply_encoding_optimization
 
         _print_info = print_info if verbose else (lambda *a, **k: None)
 
-        try:
-            from analysis.enum_usage import analyze_enum_usage
-            from arvis.codegen.rtl.encoding_optimizer import apply_encoding_optimization
+        if verbose:
+            print("\n  Encoding optimization (enum width reduction):")
 
-            # Build forced_unused from pruning decisions.
-            # The PruneConfig already knows which ALU ops and MUL modes are
-            # removable. These may still appear as dead references in
-            # id_stage.sv comparisons (e.g. alu_operator != ALU_BEXT) but
-            # were removed from the decoder and ALU case statements.
-            forced_unused = {}
-            if self.prune_config is not None:
-                # Note: alu_opcode_e is excluded — it has bit-extraction
-                # constraints and complex fused instruction interactions.
-                # ALU width is managed by the fusion RTL generator instead.
-                if self.prune_config.removable_mul_modes:
-                    forced_unused["mul_opcode_e"] = set(self.prune_config.removable_mul_modes)
+        removable_mul_modes = (
+            self.prune_config.removable_mul_modes
+            if self.prune_config is not None
+            else ()
+        )
 
-            if verbose:
-                print("\n  Encoding optimization (enum width reduction):")
-            report = analyze_enum_usage(ws.output_root)
+        result = apply_encoding_optimization(
+            ws,
+            removable_mul_modes=removable_mul_modes,
+            verbose=verbose,
+        )
+        if result is None:
+            return
 
-            result = apply_encoding_optimization(
-                ws.output_root,
-                usage_report=report,
-                forced_unused=forced_unused if forced_unused else None,
-                verbose=verbose,
+        if result.total_bits_saved > 0:
+            _print_info(
+                f"Encoding optimization: {result.total_bits_saved} bits saved "
+                f"across {result.files_modified} files"
             )
-
-            if result.total_bits_saved > 0:
-                _print_info(
-                    f"Encoding optimization: {result.total_bits_saved} bits saved "
-                    f"across {result.files_modified} files"
-                )
-                for r in result.reencodings:
-                    if not r.skipped and r.changes:
-                        _print_info(
-                            f"  {r.enum_name}: {r.old_width}b -> {r.new_width}b "
-                            f"({len(r.kept_members)} kept, "
-                            f"{len(r.removed_members)} removed)"
-                        )
-            else:
-                _print_info("Encoding optimization: no reductions possible")
-        except Exception as e:
-            from arvis.cli import print_warning
-
-            print_warning(f"Encoding optimization skipped: {e}")
+            for r in result.reencodings:
+                if not r.skipped and r.changes:
+                    _print_info(
+                        f"  {r.enum_name}: {r.old_width}b -> {r.new_width}b "
+                        f"({len(r.kept_members)} kept, "
+                        f"{len(r.removed_members)} removed)"
+                    )
+        else:
+            _print_info("Encoding optimization: no reductions possible")
 
     @staticmethod
     def _clear_fused_pragmas(rtl_dir: Path) -> None:
         """Clear content between ARVIS_FUSED_BEGIN/END pragmas."""
-        import re
+        from arvis.targets.cv32e40p.passes import clear_fused_pragmas
 
-        for filename in [
-            "include/cv32e40p_pkg.sv",
-            "cv32e40p_decoder.sv",
-            "cv32e40p_alu.sv",
-        ]:
-            fpath = rtl_dir / filename
-            if not fpath.exists():
-                continue
-            text = fpath.read_text()
-            text = re.sub(
-                r"(// ARVIS_FUSED_BEGIN: \w+\n).*?(// ARVIS_FUSED_END: \w+)",
-                r"\1\2",
-                text,
-                flags=re.DOTALL,
-            )
-            fpath.write_text(text)
+        clear_fused_pragmas(rtl_dir)
 
 
 def _hwloop_instruction_entries(hw_loop: int, next_r4_slot: int = 0):
@@ -874,7 +721,7 @@ def _hwloop_instruction_entries(hw_loop: int, next_r4_slot: int = 0):
     Places hwloop instructions at the next available R4 encoding slots
     after all fused instructions, using the same opcode space.
     """
-    from analysis.isa_db import InstructionEntry
+    from arvis.analysis.isa_db import InstructionEntry
     from arvis.codegen.gcc.peephole_gen import _r4_enc
 
     slot = next_r4_slot

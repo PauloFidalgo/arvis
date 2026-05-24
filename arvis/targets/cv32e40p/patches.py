@@ -183,7 +183,6 @@ class PrunePatch(RTLPatch):
         # Late imports keep the cv32e40p target import-light.
         from arvis.codegen.rtl.base import RTLWorkspace as LegacyWorkspace
         from arvis.codegen.rtl.rtl_pruning import RTLPruner
-        from arvis.pipeline.rtl_changeset import RTLChangeSet
 
         # The legacy RTLPruner takes its own RTLWorkspace shape
         # (codegen.rtl.base.RTLWorkspace).  Both have an
@@ -196,14 +195,6 @@ class PrunePatch(RTLPatch):
 
         # Reconstruct PruneConfig from typed Decision fields.
         config = self._build_prune_config()
-
-        # Build a minimal RTLChangeSet to use the legacy
-        # _apply_*_pragmas methods (which expect ``self.prune_config``).
-        cs = RTLChangeSet()
-        cs.prune_config = config
-        cs.used_instructions = set(self.decision.used_instructions)
-
-        cfg_shim = self._make_cfg_shim(workspace)
 
         try:
             # Step 1: Pruning parameter gating + opcode case
@@ -233,55 +224,104 @@ class PrunePatch(RTLPatch):
                 # proceed with whatever the case-pruning produced.
                 pass
 
-            # Step 2: Hwloop pragma processor (with the variant's
+            # Step 3: Hwloop pragma processor (with the variant's
             # actual hw_loop_count, stashed in workspace metadata
             # by allocate_workspace_metadata).  Mirrors legacy
             # RTLChangeSet.apply line 244.  Runs AFTER the decoder
             # regen so the regen-introduced markers get stripped at
             # the right count.
-            hw_loop_count = workspace.metadata.get("cv32e40p_hw_loop_count", 0)
-            cs.hw_loop_count = hw_loop_count
-            registry_meta = workspace.metadata.get(
-                "cv32e40p_encoding_registry"
+            from arvis.targets.cv32e40p.passes import (
+                apply_ctrl_pragmas,
+                apply_ctrl_pragmas_on_dir,
+                apply_dce_cleanup,
+                apply_debug_pragmas,
+                apply_encoding_optimization,
+                apply_hwloop_pragmas,
+                apply_irq_pragmas,
+                apply_pulp_pragmas,
+                apply_pulp_pragmas_on_dir,
             )
-            if registry_meta is not None:
-                cs._custom_registry = registry_meta
+            from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
+
+            hw_loop_count = workspace.metadata.get(
+                "cv32e40p_hw_loop_count", 0
+            )
+            registry_meta = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
+            hwlp_encoding = None
+            if registry_meta is not None and hw_loop_count > 0:
                 try:
-                    cs._hwlp_encoding = (
-                        registry_meta.get_hwloop_encoding()
-                        if hw_loop_count > 0
-                        else None
-                    )
+                    hwlp_encoding = registry_meta.get_hwloop_encoding()
                 except Exception:
-                    cs._hwlp_encoding = None
+                    hwlp_encoding = None
 
-            class _HwlpCtxShim:
-                def __setattr__(self, name, value): pass
-                def __getattr__(self, name): return None
-            cs._apply_hwloop_pragmas(legacy_ws, _HwlpCtxShim(), verbose=False)
+            apply_hwloop_pragmas(
+                workspace,
+                hw_loop_count=hw_loop_count,
+                hwlp_encoding=hwlp_encoding,
+            )
 
-            # Step 3: Pragma processors (debug/pulp/irq/ctrl) -- the
+            # Step 4: Pragma processors (debug/pulp/irq/ctrl) -- the
             # legacy code runs these whenever has_real_pruning is
             # True.  Order is canonical: debug first, then pulp,
             # irq, ctrl (matches RTLChangeSet.apply lines 305-309).
-            cs._apply_debug_pragmas(legacy_ws, cfg_shim, verbose=False)
-            cs._apply_pulp_pragmas(legacy_ws, cfg_shim, verbose=False)
-            cs._apply_irq_pragmas(legacy_ws, verbose=False)
-            cs._apply_ctrl_pragmas(legacy_ws, cfg_shim, verbose=False)
+            #
+            # Flag derivation note
+            # --------------------
+            # ``enable_debug`` here is the CLI-level user flag
+            # (analogous to ``cfg.enable_debug``), NOT the
+            # analysis-derived ``prune_config.enable_debug`` (which
+            # records "ebreak is used, must keep debug").  The
+            # workspace stores the CLI value under the well-known
+            # key ``cv32e40p_enable_debug``; emit_via_portability
+            # populates it from the changeset's owning ``cfg``.
+            # When absent (e.g. direct ``Pipeline._emit_variant``
+            # invocation in tests) we default to ``True`` -- the
+            # canonical "keep debug" stance that matches the test
+            # infrastructure's cfg-shim.
+            enable_debug = bool(
+                workspace.metadata.get("cv32e40p_enable_debug", True)
+            )
+            corev_pulp = int(getattr(config, "corev_pulp", 0) or 0)
+            enable_interrupts = bool(
+                getattr(config, "enable_interrupts", True)
+            )
+
+            apply_debug_pragmas(workspace, enable_debug=enable_debug)
+            apply_pulp_pragmas(workspace, corev_pulp=corev_pulp)
+            apply_irq_pragmas(
+                workspace, enable_interrupts=enable_interrupts
+            )
+            apply_ctrl_pragmas(
+                workspace,
+                enable_interrupts=enable_interrupts,
+                enable_debug=enable_debug,
+            )
 
             # Also process the include directory for pkg-level
             # pragmas.
-            from pathlib import Path as _Path
-            include_dir = _Path(legacy_ws.output_root) / "rtl" / "include"
+            include_dir = (
+                Path(legacy_ws.output_root) / "rtl" / "include"
+            )
             if include_dir.exists():
-                cs._apply_pulp_pragmas_on_dir(legacy_ws, cfg_shim, include_dir)
-                cs._apply_ctrl_pragmas_on_dir(legacy_ws, cfg_shim, include_dir)
+                apply_pulp_pragmas_on_dir(
+                    workspace, include_dir, corev_pulp=corev_pulp
+                )
+                apply_ctrl_pragmas_on_dir(
+                    workspace,
+                    include_dir,
+                    enable_interrupts=enable_interrupts,
+                    enable_debug=enable_debug,
+                )
 
-            # Step 4: Dead code elimination cleanup (after pragmas).
-            cs._apply_dce_cleanup(legacy_ws, verbose=False)
+            # Step 5: Dead code elimination cleanup (after pragmas).
+            apply_dce_cleanup(workspace)
 
-            # Step 5: Encoding optimization (enum width reduction).
-            cs._apply_encoding_optimization(legacy_ws, verbose=False)
+            # Step 6: Encoding optimization (enum width reduction).
+            apply_encoding_optimization(
+                workspace,
+                removable_mul_modes=config.removable_mul_modes,
+                verbose=False,
+            )
         except Exception:
             # Mirror Phase 2.1's soft-skip policy: don't abort the
             # pipeline on a render error.  In practice this should
@@ -289,34 +329,6 @@ class PrunePatch(RTLPatch):
             # pragma markers, which is a portability concern for
             # non-cv32e40p forks.
             pass
-
-    @staticmethod
-    def _make_cfg_shim(workspace: RTLWorkspace):
-        """Permissive cfg shim for the legacy pragma processors.
-
-        The processors read various ``cfg.X`` flags (debug,
-        prune_*, enable_*, etc.).  We give defaults that match
-        the canonical non-PULP, non-debug-trigger configuration
-        the test infrastructure uses.
-        """
-        class _Cfg:
-            def __init__(self, rtl_root):
-                self.rtl_root = rtl_root
-                self.prune_rf_read_c = False
-                self.prune_rf_write_b = False
-                self.enable_debug = True
-                self.enable_hpm = True
-
-            def __getattr__(self, name):
-                # Bool flags default True (legacy behaviour for
-                # any flag the cfg doesn't predict).
-                if name.startswith("enable_"):
-                    return True
-                if name.startswith("prune_"):
-                    return False
-                return None
-
-        return _Cfg(str(workspace.source_root))
 
     def _build_prune_config(self):
         """Construct a :class:`PruneConfig` from the typed Decision.
@@ -390,16 +402,6 @@ class FusionPatch(RTLPatch):
             # No fusions -- nothing to patch.  Workspace untouched.
             return
 
-        from arvis.pipeline.rtl_changeset import RTLChangeSet
-
-        # Build a temporary RTLChangeSet that just carries the
-        # fusion data.  We do NOT call its public ``apply`` because
-        # that re-copies the workspace (clobbering any prior patches
-        # the pipeline applied).  Instead we call the private
-        # ``_apply_fusion_patches`` directly.
-        cs = RTLChangeSet()
-        cs.fused_operations = list(self.decision.fused_ops)
-
         # Read the per-variant encoding registry from the workspace
         # metadata, populated by
         # :meth:`CV32E40P.allocate_workspace_metadata` before any
@@ -410,31 +412,27 @@ class FusionPatch(RTLPatch):
         # (FUSED_PRUNED variant), no hwloop slots are reserved and
         # the fused ops fill the front of the opcode space.
         from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
+        from arvis.targets.cv32e40p.passes import apply_fusion_patches
+
         registry = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
-        if registry is not None:
-            cs._custom_registry = registry
-            # The legacy code sets hw_loop_count from
-            # registry.hwloop_instructions when present.  Mirror it
-            # so the fusion path knows how many hwloop slots to
-            # account for.
-            cs.hw_loop_count = len(getattr(registry, "hwloop_instructions", []))
-
-        # Build a minimal ctx shim.  The legacy method only writes
-        # ``ctx.fusion_rtl_applied = True`` at the end and reads
-        # nothing, so a permissive proxy works.
-        class _CtxShim:
-            def __setattr__(self, name, value):
-                pass
-
-            def __getattr__(self, name):
-                return None
+        hw_loop_count = (
+            len(getattr(registry, "hwloop_instructions", []))
+            if registry is not None
+            else 0
+        )
 
         try:
-            cs._apply_fusion_patches(workspace, _CtxShim())
-            # Signal to LoopPatch that fusion patches have run; it
-            # will skip its own hwloop decoder injection because
-            # _apply_fusion_patches already did it.
-            workspace.metadata["cv32e40p_fusion_patch_ran"] = True
+            ok = apply_fusion_patches(
+                workspace,
+                fused_operations=list(self.decision.fused_ops),
+                registry=registry,
+                hw_loop_count=hw_loop_count,
+            )
+            if ok:
+                # Signal to LoopPatch that fusion patches have run;
+                # it will skip its own hwloop decoder injection
+                # because apply_fusion_patches already did it.
+                workspace.metadata["cv32e40p_fusion_patch_ran"] = True
         except Exception:
             # Soft-skip on render error (Phase 2.1 policy).
             pass
@@ -540,32 +538,33 @@ class LoopPatch(RTLPatch):
 
     @staticmethod
     def _inject_hwloop_decoder_cases(workspace: RTLWorkspace, registry) -> None:
-        """Run the legacy fusion-patch flow with EMPTY fused_ops
-        + the registry, to inject hwloop OPCODE_CUSTOM_* decoder
-        cases.
+        """Inject hwloop OPCODE_CUSTOM_* decoder cases via the
+        canonical fusion pass with empty ``fused_operations``.
 
         Mirrors the legacy RTLChangeSet.apply branch where
         ``has_hwlp`` is True but ``fused_operations`` is empty.
+        Delegates to :func:`targets.cv32e40p.passes.apply_fusion_patches`,
+        which is the single source of truth for fusion-style
+        patching across both the legacy and portable code paths.
         """
         if registry is None:
             return
-        from arvis.pipeline.rtl_changeset import RTLChangeSet
 
-        cs = RTLChangeSet()
-        cs.fused_operations = []  # explicit: no fused ops
-        cs._custom_registry = registry
+        from arvis.targets.cv32e40p.passes import apply_fusion_patches
+
         try:
-            cs._hwlp_encoding = registry.get_hwloop_encoding()
+            hwlp_encoding = registry.get_hwloop_encoding()
         except Exception:
-            cs._hwlp_encoding = None
-        cs.hw_loop_count = len(getattr(registry, "hwloop_instructions", []))
-
-        class _CtxShim:
-            def __setattr__(self, name, value): pass
-            def __getattr__(self, name): return None
+            hwlp_encoding = None
 
         try:
-            cs._apply_fusion_patches(workspace, _CtxShim())
+            apply_fusion_patches(
+                workspace,
+                fused_operations=(),  # explicit: no fused ops
+                registry=registry,
+                hwlp_encoding=hwlp_encoding,
+                hw_loop_count=len(getattr(registry, "hwloop_instructions", [])),
+            )
         except Exception:
             # Some templates may lack the ARVIS_FUSED_BEGIN markers
             # the fusion patcher needs; documented portability
@@ -612,30 +611,6 @@ class LoopPatch(RTLPatch):
                 )
             if new_text != text:
                 sv_file.write_text(new_text)
-
-    @staticmethod
-    def _apply_pragmas_only(workspace: RTLWorkspace, hw_loop_count: int) -> None:
-        """Run only the pragma processor, no template swap.
-
-        Used when nest_depth=0 to mirror legacy behaviour where the
-        ARVIS_HWLP pragmas are stripped out (hwloop disabled).
-        """
-        from arvis.pipeline.rtl_changeset import RTLChangeSet
-
-        cs = RTLChangeSet()
-        cs.hw_loop_count = hw_loop_count
-
-        class _CtxShim:
-            def __setattr__(self, name, value):
-                pass
-
-            def __getattr__(self, name):
-                return None
-
-        try:
-            cs._apply_hwloop_pragmas(workspace, _CtxShim(), verbose=False)
-        except Exception:
-            pass
 
     @staticmethod
     def _swap_hwloop_regs_template(workspace: RTLWorkspace, encoding) -> None:

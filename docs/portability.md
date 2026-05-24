@@ -141,6 +141,42 @@ class IbexCore(TargetCore):
         return [IbexWidthPatch(decision=decision)]
 ```
 
+### Step 3.5. (Optional) Factor RTL passes as free functions
+
+If you find yourself implementing the same low-level RTL
+transformation in multiple `RTLPatch` subclasses, lift it into
+a free function in `targets/<core_name>/passes.py`.  This is
+the pattern the cv32e40p target uses:
+
+```python
+# targets/<core_name>/passes.py
+
+def apply_my_pass(
+    workspace: RTLWorkspace,
+    *,
+    enabled: bool,
+    threshold: int = 0,
+) -> list:
+    """One-line summary.  Idempotent.  Returns stats."""
+    rtl_dir = workspace.output_root / "rtl"
+    ...
+    return stats
+```
+
+Free functions:
+
+* take only what they need (no implicit `self.`),
+* are unit-testable in isolation,
+* are reusable across multiple patches AND any legacy code
+  paths (such as a per-target `RTLChangeSet`-style helper).
+
+The cv32e40p reference target ships with 12 such passes
+(`apply_hwloop_pragmas`, `apply_fusion_patches`,
+`apply_debug_pragmas`, ...) covering every RTL mutation the
+five standard variants need.  See
+`targets/cv32e40p/passes.py` for the canonical example and
+`tests/portability/test_passes.py` for the contract-test pattern.
+
 ### Step 4. Define the variant configs
 
 In `targets/<core_name>/variants.py`, define
