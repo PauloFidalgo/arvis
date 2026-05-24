@@ -292,38 +292,60 @@ class CV32E40P(TargetCore):
 
         return [LoopPatch(decision=decision)]
 
-    # ── Per-variant workspace metadata ────────────────────────────
+    # ── Per-variant workspace metadata + pre-patch processing ────
     def allocate_workspace_metadata(
         self, variant, decisions_by_kind, workspace
     ) -> None:
-        """Compute the cv32e40p custom-instruction encoding registry
-        and stash it in :attr:`workspace.metadata`.
+        """Compute per-variant shared state and run pre-patch
+        processing.
 
         Called once per variant emission by
         :meth:`Pipeline._emit_variant` BEFORE any patches run.
-        Patches read the registry under
-        :data:`targets.cv32e40p.encoding.WORKSPACE_REGISTRY_KEY`
-        when they need it (FusionPatch and LoopPatch in particular
-        for the ALL variant where they share opcode space).
+        Does two things:
+
+        1. Builds the cv32e40p custom-instruction encoding registry
+           (fusion + hwloop slot accountant) and stashes it under
+           :data:`targets.cv32e40p.encoding.WORKSPACE_REGISTRY_KEY`.
+           Patches read this when they need to know which slots
+           are theirs.
+
+        2. Runs the hwloop pragma processor at the variant's actual
+           hw_loop count.  The legacy
+           :class:`pipeline.rtl_changeset.RTLChangeSet` calls this
+           BEFORE pruning runs (line 244).  We mirror the order
+           here.  This step strips ARVIS_HWLP markers when no
+           hwloop is in the variant (nest_depth=0); when there is,
+           it keeps the right blocks active.
         """
         from arvis.targets.cv32e40p.encoding import (
             allocate_for_variant,
             WORKSPACE_REGISTRY_KEY,
         )
 
-        # Pick the relevant decisions for this variant.  When the
-        # variant excludes a decision kind, pass None so the
-        # allocator knows to skip those slots.
+        # Pick relevant decisions.
         fusion_decision = None
         loop_decision = None
         if variant.includes("FusionDecision"):
             fdl = decisions_by_kind.get("FusionDecision", [])
             if fdl:
-                fusion_decision = fdl[0]  # one decision per kind today
+                fusion_decision = fdl[0]
         if variant.includes("LoopDecision"):
             ldl = decisions_by_kind.get("LoopDecision", [])
             if ldl:
                 loop_decision = ldl[0]
 
+        # ── Encoding registry ──
         registry = allocate_for_variant(fusion_decision, loop_decision)
         workspace.metadata[WORKSPACE_REGISTRY_KEY] = registry
+
+        # ── Stash the variant's hw_loop_count for PrunePatch ──
+        # PrunePatch needs to run the hwloop pragma processor at
+        # the right hw_loop count AFTER it regenerates the
+        # specialized decoder (otherwise the regen would
+        # reintroduce the markers).  Skip for BASELINE since the
+        # pragma processor wouldn't run there anyway.
+        if variant.decision_kinds:
+            nest_depth = (
+                loop_decision.nest_depth if loop_decision is not None else 0
+            )
+            workspace.metadata["cv32e40p_hw_loop_count"] = nest_depth

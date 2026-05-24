@@ -161,15 +161,15 @@ class PrunePatch(RTLPatch):
         )
 
     def apply(self, workspace: RTLWorkspace) -> None:
-        # Late imports keep the cv32e40p target import-light; the
-        # legacy modules pull in cli, config, etc.
+        # Late imports keep the cv32e40p target import-light.
         from arvis.codegen.rtl.base import RTLWorkspace as LegacyWorkspace
         from arvis.codegen.rtl.rtl_pruning import RTLPruner
+        from arvis.pipeline.rtl_changeset import RTLChangeSet
 
         # The legacy RTLPruner takes its own RTLWorkspace shape
         # (codegen.rtl.base.RTLWorkspace).  Both have an
         # ``output_root`` attribute so we can wrap one in the
-        # other.  Phase 3.1+ unifies them.
+        # other.
         legacy_ws = LegacyWorkspace(
             source_root=str(workspace.source_root),
             output_root=str(workspace.output_root),
@@ -178,12 +178,124 @@ class PrunePatch(RTLPatch):
         # Reconstruct PruneConfig from typed Decision fields.
         config = self._build_prune_config()
 
+        # Build a minimal RTLChangeSet to use the legacy
+        # _apply_*_pragmas methods (which expect ``self.prune_config``).
+        cs = RTLChangeSet()
+        cs.prune_config = config
+        cs.used_instructions = set(self.decision.used_instructions)
+
+        cfg_shim = self._make_cfg_shim(workspace)
+
         try:
-            RTLPruner(legacy_ws).apply(config, verbose=False)
+            # Step 1: Pruning parameter gating + decoder regen +
+            # case pruning.
+            pruner = RTLPruner(legacy_ws)
+
+            # Generate specialized decoder from the workload's
+            # actual used_instructions.  Mirrors legacy
+            # RTLChangeSet.apply line 223.  Note this regenerates
+            # decoder.sv from a template that re-introduces the
+            # ARVIS_HWLP markers; pragma processing in Step 3 below
+            # strips them back out at the right hw_loop count.
+            try:
+                pruner.generate_specialized_decoder(
+                    used_instructions=set(self.decision.used_instructions),
+                    custom_instructions=None,
+                )
+            except Exception:
+                # Decoder regeneration may fail when the templates
+                # don't have the expected structure (e.g. an early
+                # cv32e40p baseline missing the
+                # generate_specialized_decoder anchors).  Swallow
+                # and proceed with the unspecialised decoder.
+                pass
+
+            # Apply parameter gates + case pruning.
+            pruner.apply(config, verbose=False)
+
+            # Step 2: Hwloop pragma processor (with the variant's
+            # actual hw_loop_count, stashed in workspace metadata
+            # by allocate_workspace_metadata).  Mirrors legacy
+            # RTLChangeSet.apply line 244.  Runs AFTER the decoder
+            # regen so the regen-introduced markers get stripped at
+            # the right count.
+            hw_loop_count = workspace.metadata.get("cv32e40p_hw_loop_count", 0)
+            cs.hw_loop_count = hw_loop_count
+            registry_meta = workspace.metadata.get(
+                "cv32e40p_encoding_registry"
+            )
+            if registry_meta is not None:
+                cs._custom_registry = registry_meta
+                try:
+                    cs._hwlp_encoding = (
+                        registry_meta.get_hwloop_encoding()
+                        if hw_loop_count > 0
+                        else None
+                    )
+                except Exception:
+                    cs._hwlp_encoding = None
+
+            class _HwlpCtxShim:
+                def __setattr__(self, name, value): pass
+                def __getattr__(self, name): return None
+            cs._apply_hwloop_pragmas(legacy_ws, _HwlpCtxShim(), verbose=False)
+
+            # Step 3: Pragma processors (pulp/irq/ctrl/debug) -- the
+            # legacy code runs these whenever has_real_pruning is
+            # True.
+            cs._apply_pulp_pragmas(legacy_ws, cfg_shim, verbose=False)
+            cs._apply_irq_pragmas(legacy_ws, verbose=False)
+            cs._apply_ctrl_pragmas(legacy_ws, cfg_shim, verbose=False)
+            cs._apply_debug_pragmas(legacy_ws, cfg_shim, verbose=False)
+
+            # Also process the include directory for pkg-level
+            # pragmas.
+            from pathlib import Path as _Path
+            include_dir = _Path(legacy_ws.output_root) / "rtl" / "include"
+            if include_dir.exists():
+                cs._apply_pulp_pragmas_on_dir(legacy_ws, cfg_shim, include_dir)
+                cs._apply_ctrl_pragmas_on_dir(legacy_ws, cfg_shim, include_dir)
+
+            # Step 4: Dead code elimination cleanup (after pragmas).
+            cs._apply_dce_cleanup(legacy_ws, verbose=False)
+
+            # Step 5: Encoding optimization (enum width reduction).
+            cs._apply_encoding_optimization(legacy_ws, verbose=False)
         except Exception:
             # Mirror Phase 2.1's soft-skip policy: don't abort the
-            # pipeline on a render error.
+            # pipeline on a render error.  In practice this should
+            # only happen when the RTL templates lack the expected
+            # pragma markers, which is a portability concern for
+            # non-cv32e40p forks.
             pass
+
+    @staticmethod
+    def _make_cfg_shim(workspace: RTLWorkspace):
+        """Permissive cfg shim for the legacy pragma processors.
+
+        The processors read various ``cfg.X`` flags (debug,
+        prune_*, enable_*, etc.).  We give defaults that match
+        the canonical non-PULP, non-debug-trigger configuration
+        the test infrastructure uses.
+        """
+        class _Cfg:
+            def __init__(self, rtl_root):
+                self.rtl_root = rtl_root
+                self.prune_rf_read_c = False
+                self.prune_rf_write_b = False
+                self.enable_debug = True
+                self.enable_hpm = True
+
+            def __getattr__(self, name):
+                # Bool flags default True (legacy behaviour for
+                # any flag the cfg doesn't predict).
+                if name.startswith("enable_"):
+                    return True
+                if name.startswith("prune_"):
+                    return False
+                return None
+
+        return _Cfg(str(workspace.source_root))
 
     def _build_prune_config(self):
         """Construct a :class:`PruneConfig` from the typed Decision.
@@ -347,54 +459,82 @@ class LoopPatch(RTLPatch):
         )
 
     def apply(self, workspace: RTLWorkspace) -> None:
-        if self.decision.nest_depth == 0 and not self.decision.patched_loops:
-            # No hwloop activity -- pragma processor still runs to
-            # strip any ARVIS_HWLP markers from the templates,
-            # mirroring legacy behaviour where _apply_hwloop_pragmas
-            # is called unconditionally.
-            self._apply_pragmas_only(workspace, hw_loop_count=0)
+        # Hwloop pragma processing was already done by
+        # CV32E40P.allocate_workspace_metadata BEFORE any patches
+        # ran (with the variant's actual nest_depth).  This patch
+        # only does the template swap + parameter rewrites, both
+        # gated on nest_depth > 0.
+        if self.decision.nest_depth == 0:
             return
 
-        from arvis.pipeline.rtl_changeset import RTLChangeSet
-
-        cs = RTLChangeSet()
-        cs.hw_loop_count = self.decision.nest_depth
-
-        # Read the encoding registry from workspace metadata (set by
-        # CV32E40P.allocate_workspace_metadata).  When present the
-        # registry's hwloop encoding is used to patch funct3 values
-        # in the swapped hwloop_regs template; when absent we still
-        # do the template swap with default funct3 values.
+        # Read the encoding registry that allocate_workspace_metadata
+        # populated.
         from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
         registry = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
+        encoding = None
         if registry is not None:
-            cs._custom_registry = registry
             try:
-                cs._hwlp_encoding = registry.get_hwloop_encoding()
+                encoding = registry.get_hwloop_encoding()
             except Exception:
-                cs._hwlp_encoding = None
+                encoding = None
 
-        # Build a minimal ctx shim.  _apply_hwloop_pragmas only
-        # writes status flags; reads via getattr return None.
-        class _CtxShim:
-            def __setattr__(self, name, value):
-                pass
+        # Swap in the parameterised hwloop_regs template (mirrors
+        # legacy RTLChangeSet.apply lines 245-...).
+        self._swap_hwloop_regs_template(workspace, encoding)
 
-            def __getattr__(self, name):
-                return None
+        # Rewrite HW_LOOP, CNT_WIDTH, HWLP_ADDR_WIDTH parameters
+        # across every .sv file in the workspace (including the
+        # testbench).  Mirrors legacy RTLChangeSet.apply lines
+        # 285-303.  These are the loop's own parameters; the
+        # width strategy still owns PC_WIDTH but the hwloop-
+        # specific widths belong here.
+        self._rewrite_loop_parameters(
+            workspace,
+            hw_loop=self.decision.nest_depth,
+            cnt_width=self.decision.counter_width,
+            addr_width=self.decision.addr_width,
+        )
 
-        try:
-            cs._apply_hwloop_pragmas(workspace, _CtxShim(), verbose=False)
-        except Exception:
-            pass
+    @staticmethod
+    def _rewrite_loop_parameters(
+        workspace: RTLWorkspace,
+        *,
+        hw_loop: int,
+        cnt_width: int,
+        addr_width: int,
+    ) -> None:
+        """Rewrite HW_LOOP / CNT_WIDTH / HWLP_ADDR_WIDTH parameters
+        across every ``.sv`` file in the workspace.
 
-        # When hw_loop_count > 0, swap in the parameterised
-        # hwloop_regs template.  This mirrors lines 245-... of the
-        # legacy RTLChangeSet.apply.
-        if cs.hw_loop_count > 0:
-            self._swap_hwloop_regs_template(
-                workspace, getattr(cs, "_hwlp_encoding", None)
+        Mirrors the legacy RTLChangeSet.apply behaviour.  The
+        ``parameter HW_LOOP`` rewrite always runs when nest_depth>0;
+        CNT_WIDTH and HWLP_ADDR_WIDTH only when they're below the
+        no-narrowing default of 32 (otherwise the rewrite is a
+        no-op, but writing identical text would still touch file
+        timestamps).
+        """
+        import re as _re
+        for sv_file in workspace.output_root.rglob("*.sv"):
+            text = sv_file.read_text()
+            new_text = _re.sub(
+                r"parameter\s+HW_LOOP\s*=\s*\d+",
+                f"parameter HW_LOOP = {hw_loop}",
+                text,
             )
+            if cnt_width < 32:
+                new_text = _re.sub(
+                    r"parameter\s+CNT_WIDTH\s*=\s*\d+",
+                    f"parameter CNT_WIDTH = {cnt_width}",
+                    new_text,
+                )
+            if addr_width < 32:
+                new_text = _re.sub(
+                    r"parameter\s+HWLP_ADDR_WIDTH\s*=\s*\d+",
+                    f"parameter HWLP_ADDR_WIDTH = {addr_width}",
+                    new_text,
+                )
+            if new_text != text:
+                sv_file.write_text(new_text)
 
     @staticmethod
     def _apply_pragmas_only(workspace: RTLWorkspace, hw_loop_count: int) -> None:

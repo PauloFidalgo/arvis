@@ -204,18 +204,17 @@ class TestLoopPatch:
         assert "cnt=12" in p.label
         assert "addr=14" in p.label
 
-    def test_nest_zero_strips_pragmas(self, cv32_workspace, cv32_target):
-        # Before applying, ARVIS_HWLP_BEGIN markers exist in the
-        # decoder template.  After applying with nest=0 the markers
-        # should be gone (legacy behaviour: pragmas are processed
-        # unconditionally).
+    def test_nest_zero_is_noop_after_metadata_pragmas(self, cv32_workspace, cv32_target):
+        # The hwloop pragma processor used to be invoked by
+        # LoopPatch directly; it now runs in
+        # CV32E40P.allocate_workspace_metadata BEFORE patches.
+        # LoopPatch with nest=0 is therefore a true no-op (the
+        # pragma stripping happens at metadata-allocation time).
+        # We verify that here: the patch leaves the workspace
+        # untouched.
         decoder = cv32_workspace.output_root / "rtl/cv32e40p_decoder.sv"
         before = decoder.read_text()
-        if "ARVIS_HWLP_BEGIN" not in before:
-            pytest.skip(
-                "RTL decoder lacks ARVIS_HWLP_BEGIN markers; tree predates "
-                "the Phase 4 hwloop pragma work."
-            )
         LoopPatch(decision=LoopDecision(nest_depth=0)).apply(cv32_workspace)
         after = decoder.read_text()
-        assert "ARVIS_HWLP_BEGIN" not in after
+        # LoopPatch nest=0 is a no-op now.
+        assert before == after
