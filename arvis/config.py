@@ -8,14 +8,14 @@ main.py reads these and passes them to the relevant subsystems.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core_descriptor import CoreDescriptor
 
 # ── Benchmark registry ──
 
-BENCHMARKS: Dict[str, Dict[str, str]] = {
+BENCHMARKS: dict[str, dict[str, str]] = {
     "kyber": {
         "dir": "targets/benchmarks/kyber512_rv32",
         "elf": "kyber512_rv32.elf",
@@ -74,17 +74,57 @@ BENCHMARKS: Dict[str, Dict[str, str]] = {
     "embench": {
         "dir": "targets/benchmarks/embench",
         "programs": [
-            {"name": "aha-mont64",  "elf": "aha-mont64.elf",  "hex": "aha-mont64.hex",  "spike_elf": "aha-mont64_spike.elf"},
-            {"name": "crc32",       "elf": "crc32.elf",       "hex": "crc32.hex",       "spike_elf": "crc32_spike.elf"},
-            {"name": "depthconv",   "elf": "depthconv.elf",   "hex": "depthconv.hex",   "spike_elf": "depthconv_spike.elf"},
-            {"name": "edn",         "elf": "edn.elf",         "hex": "edn.hex",         "spike_elf": "edn_spike.elf"},
-            {"name": "matmult-int", "elf": "matmult-int.elf", "hex": "matmult-int.hex", "spike_elf": "matmult-int_spike.elf"},
-            {"name": "nettle-aes",  "elf": "nettle-aes.elf",  "hex": "nettle-aes.hex",  "spike_elf": "nettle-aes_spike.elf"},
-            {"name": "nsichneu",    "elf": "nsichneu.elf",    "hex": "nsichneu.hex",    "spike_elf": "nsichneu_spike.elf"},
-            {"name": "picojpeg",    "elf": "picojpeg.elf",    "hex": "picojpeg.hex",    "spike_elf": "picojpeg_spike.elf"},
-            {"name": "slre",        "elf": "slre.elf",        "hex": "slre.hex",        "spike_elf": "slre_spike.elf"},
-            {"name": "ud",          "elf": "ud.elf",          "hex": "ud.hex",          "spike_elf": "ud_spike.elf"},
-            {"name": "xgboost",     "elf": "xgboost.elf",     "hex": "xgboost.hex",     "spike_elf": "xgboost_spike.elf"},
+            {
+                "name": "aha-mont64",
+                "elf": "aha-mont64.elf",
+                "hex": "aha-mont64.hex",
+                "spike_elf": "aha-mont64_spike.elf",
+            },
+            {
+                "name": "crc32",
+                "elf": "crc32.elf",
+                "hex": "crc32.hex",
+                "spike_elf": "crc32_spike.elf",
+            },
+            {
+                "name": "depthconv",
+                "elf": "depthconv.elf",
+                "hex": "depthconv.hex",
+                "spike_elf": "depthconv_spike.elf",
+            },
+            {"name": "edn", "elf": "edn.elf", "hex": "edn.hex", "spike_elf": "edn_spike.elf"},
+            {
+                "name": "matmult-int",
+                "elf": "matmult-int.elf",
+                "hex": "matmult-int.hex",
+                "spike_elf": "matmult-int_spike.elf",
+            },
+            {
+                "name": "nettle-aes",
+                "elf": "nettle-aes.elf",
+                "hex": "nettle-aes.hex",
+                "spike_elf": "nettle-aes_spike.elf",
+            },
+            {
+                "name": "nsichneu",
+                "elf": "nsichneu.elf",
+                "hex": "nsichneu.hex",
+                "spike_elf": "nsichneu_spike.elf",
+            },
+            {
+                "name": "picojpeg",
+                "elf": "picojpeg.elf",
+                "hex": "picojpeg.hex",
+                "spike_elf": "picojpeg_spike.elf",
+            },
+            {"name": "slre", "elf": "slre.elf", "hex": "slre.hex", "spike_elf": "slre_spike.elf"},
+            {"name": "ud", "elf": "ud.elf", "hex": "ud.hex", "spike_elf": "ud_spike.elf"},
+            {
+                "name": "xgboost",
+                "elf": "xgboost.elf",
+                "hex": "xgboost.hex",
+                "spike_elf": "xgboost_spike.elf",
+            },
         ],
     },
     "xgboost": {
@@ -170,7 +210,7 @@ BENCHMARKS: Dict[str, Dict[str, str]] = {
         "elf": "statemate_spike.elf",
         "verilator_elf": "statemate.elf",
         "hex": "statemate.hex",
-    }, 
+    },
     "tarfind": {
         "dir": "targets/benchmarks/tarfind",
         "elf": "tarfind_spike.elf",
@@ -209,7 +249,7 @@ BENCHMARKS: Dict[str, Dict[str, str]] = {
         "elf": "picojpeg_spike.elf",
         "verilator_elf": "picojpeg.elf",
         "hex": "picojpeg.hex",
-    }
+    },
 }
 
 # Auto-register each embench program as an individual benchmark
@@ -234,7 +274,7 @@ def _is_suite(name: str) -> bool:
     return "programs" in bm
 
 
-def _suite_program_configs(name: str) -> List[Dict[str, str]]:
+def _suite_program_configs(name: str) -> list[dict[str, str]]:
     """Return per-program config dicts for a suite benchmark."""
     bm = BENCHMARKS.get(name, {})
     suite_dir = bm.get("dir", "")
@@ -307,16 +347,23 @@ class ToolConfig:
     # also picked up via the ``ARVIS_USE_PORTABILITY=1`` env var.
     use_portability: bool = False
 
+    # Phase 6: route the HW_LOOP sweep's per-candidate sim+synth
+    # through HWLoopVariantEvaluator + Pipeline._emit_variant +
+    # VerilatorVerifier + YosysSynthesisFlow.  Implies
+    # ``use_portability=True``.  Set by ``--use-pipeline-runner``;
+    # also picked up via ``ARVIS_USE_PIPELINE_RUNNER=1``.
+    use_pipeline_runner: bool = False
+
     # ── Core descriptor (loaded lazily from rtl_root) ──
-    _core_descriptor: Optional["CoreDescriptor"] = field(default=None, repr=False, compare=False)
+    _core_descriptor: CoreDescriptor | None = field(default=None, repr=False, compare=False)
 
     # ── Detected toolchain (populated by toolchain.detect_toolchain) ──
-    riscv_objdump: Optional[str] = None
-    riscv_gcc: Optional[str] = None
-    riscv_objcopy: Optional[str] = None
-    spike_bin: Optional[str] = None
-    verilator_bin: Optional[str] = None
-    yosys_bin: Optional[str] = None
+    riscv_objdump: str | None = None
+    riscv_gcc: str | None = None
+    riscv_objcopy: str | None = None
+    spike_bin: str | None = None
+    verilator_bin: str | None = None
+    yosys_bin: str | None = None
 
     def __post_init__(self):
         """Resolve paths from benchmark name if not explicitly set."""
@@ -332,7 +379,7 @@ class ToolConfig:
             self.output_dir = f"output/{self.benchmark_name}_specialized"
 
     @property
-    def core_descriptor(self) -> "CoreDescriptor":
+    def core_descriptor(self) -> CoreDescriptor:
         """Lazy-load the core descriptor from the RTL root directory.
 
         Looks for ``core_descriptor.yaml`` in ``self.rtl_root``.
@@ -345,7 +392,7 @@ class ToolConfig:
         return self._core_descriptor
 
     @classmethod
-    def from_benchmark(cls, name: str) -> "ToolConfig":
+    def from_benchmark(cls, name: str) -> ToolConfig:
         """Create config for a specific benchmark."""
         if name not in BENCHMARKS:
             raise ValueError(f"Unknown benchmark: {name}. Available: {list(BENCHMARKS.keys())}")
@@ -361,27 +408,31 @@ class ToolConfig:
         return _is_suite(self.benchmark_name)
 
     @property
-    def suite_programs(self) -> List[Dict[str, str]]:
+    def suite_programs(self) -> list[dict[str, str]]:
         """Per-program configs for a suite. Empty for single-program benchmarks."""
         if not self.is_suite:
             return []
         return _suite_program_configs(self.benchmark_name)
 
-    def for_program(self, prog: Dict[str, str]) -> "ToolConfig":
+    def for_program(self, prog: dict[str, str]) -> ToolConfig:
         """Create a single-program ToolConfig from a suite program entry.
 
         Used internally to run per-program analysis within a suite.
         """
         import copy as _copy
         import os as _os
+
         child = _copy.copy(self)
         child.benchmark_name = prog["name"]
         child.benchmark_dir = self.benchmark_dir
         child.trace_path = f"{self.benchmark_dir}/traces/{prog['name']}_spike.log"
         # Use Spike ELF for disassembly when trace exists (PCs must match)
         spike_elf = prog.get("spike_elf", "")
-        if spike_elf and _os.path.exists(f"{self.benchmark_dir}/{spike_elf}") \
-                and _os.path.exists(child.trace_path):
+        if (
+            spike_elf
+            and _os.path.exists(f"{self.benchmark_dir}/{spike_elf}")
+            and _os.path.exists(child.trace_path)
+        ):
             child.elf_path = f"{self.benchmark_dir}/{spike_elf}"
         else:
             child.elf_path = f"{self.benchmark_dir}/{prog['elf']}"

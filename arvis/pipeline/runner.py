@@ -1043,8 +1043,7 @@ def _sweep_hwloop_candidates(
     candidates.
     """
     from arvis.cli import print_info, print_section
-    from arvis.pipeline import verification
-    from arvis.pipeline.hwloop_sweep import HWLoopSweepResult, SweepWinners
+    from arvis.pipeline.hwloop_sweep import SweepWinners
 
     candidates = ctx.hwloop_candidates
     if len(candidates) <= 1:
@@ -1061,6 +1060,140 @@ def _sweep_hwloop_candidates(
     # Protect results from earlier steps — sweep labels fall through to these
     saved_sim_pruned = ctx.sim_pruned
     saved_synth = ctx.synth_comparison
+
+    # Phase 6 gateway: when ``--use-pipeline-runner`` is set, the
+    # per-candidate sim+synth runs through
+    # :class:`HWLoopVariantEvaluator`.  When unset (the default),
+    # the legacy inline loop runs unchanged.
+    use_pipeline_runner = os.environ.get("ARVIS_USE_PIPELINE_RUNNER") == "1" or bool(
+        getattr(cfg, "use_pipeline_runner", False)
+    )
+
+    if use_pipeline_runner:
+        print_info(
+            "[pipeline-runner] HW_LOOP sweep using HWLoopVariantEvaluator + Pipeline._emit_variant"
+        )
+        results = _evaluate_hwloop_via_pipeline(
+            cfg, ctx, changeset, candidates, prune_config_orig, all_used_orig
+        )
+    else:
+        results = _evaluate_hwloop_via_legacy(
+            cfg, ctx, changeset, candidates, prune_config_orig, all_used_orig
+        )
+
+    # Restore
+    changeset.hw_loop_count = saved_hw
+    ctx.fused_hex_path, ctx.fused_elf_path = saved_hex, saved_elf
+    ctx.sim_pruned = saved_sim_pruned
+    ctx.synth_comparison = saved_synth
+
+    # Phase 5: hand off to the unified sweep framework for selection.
+    # The dual-compile + per-candidate sim + synth above produced
+    # the metrics table; the framework now picks the winner.
+    return _select_hwloop_winners(results)
+
+
+def _evaluate_hwloop_via_pipeline(
+    cfg, ctx, changeset, candidates, prune_config_orig, all_used_orig
+):
+    """Phase 6 gateway: evaluate HW_LOOP candidates via the
+    unified :class:`HWLoopVariantEvaluator` + ``Pipeline._emit_variant``.
+
+    Differs from the legacy inline loop in that:
+      * RTL emission goes through ``Pipeline._emit_variant``.
+      * Simulation goes through :class:`VerilatorVerifier`.
+      * Synthesis goes through :class:`YosysSynthesisFlow`.
+
+    The per-candidate dual-compile (Docker / GCC ELF generation)
+    is upstream of this; the candidate is expected to carry its
+    own ``fused_hex`` / ``fused_elf`` paths.
+    """
+    from arvis.cli import print_info
+
+    # Build the Pipeline + verifier + synth wiring once.
+    from arvis.core.pipeline import Pipeline
+    from arvis.core.sweep import SweepCandidate
+    from arvis.pipeline.hwloop_sweep import HWLoopSweepResult
+    from arvis.simulation.verifier import VerilatorVerifier
+    from arvis.synthesis.yosys_flow import YosysSynthesisFlow
+    from arvis.targets import CV32E40P
+    from arvis.targets.cv32e40p.sweep_evaluators import HWLoopVariantEvaluator
+
+    target = CV32E40P()
+    verifier = VerilatorVerifier(
+        rtl_root=cfg.rtl_root,
+        sim_timeout_seconds=cfg.sim_timeout_seconds,
+        verilator_bin="verilator",
+        extra_flags=getattr(ctx, "verilator_extra_flags", None),
+    )
+    synth = YosysSynthesisFlow()
+    pipeline = Pipeline(
+        target=target,
+        toolchain=None,  # type: ignore[arg-type]
+        strategies=[],
+        verifier=verifier,  # type: ignore[arg-type]
+        synthesis=synth,
+        variants=[],
+    )
+    sweep_dir = Path(cfg.output_dir) / "hwloop_sweep_via_pipeline"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+
+    # Map candidate -> hex.  The legacy candidate stores the
+    # path on cand.fused_hex.
+    cand_by_depth = {c.hw_loop: c for c in candidates}
+
+    def hex_for(sweep_cand: SweepCandidate) -> str:
+        depth = int(sweep_cand["HW_LOOP"])
+        legacy_cand = cand_by_depth.get(depth)
+        if legacy_cand is None or not legacy_cand.fused_hex:
+            raise FileNotFoundError(f"no hex for HW_LOOP={depth}")
+        return legacy_cand.fused_hex
+
+    evaluator = HWLoopVariantEvaluator(
+        target=target,
+        pipeline=pipeline,
+        output_dir=sweep_dir,
+        hex_path_for=hex_for,
+        base_decisions={},  # Phase 6.1: no Prune/Fusion injection yet
+    )
+
+    results = []
+    for cand in candidates:
+        if not cand.fused_hex:
+            results.append(
+                HWLoopSweepResult(hw_loop=cand.hw_loop, loops_patched=cand.loops_patched)
+            )
+            continue
+
+        sweep_cand = SweepCandidate(overrides={"HW_LOOP": cand.hw_loop})
+        metrics = evaluator(sweep_cand)
+
+        r = HWLoopSweepResult(hw_loop=cand.hw_loop, loops_patched=cand.loops_patched)
+        r.cycles = int(metrics.get("cycles", 0))
+        r.cells = int(metrics.get("cells", 0))
+        r.passed = bool(metrics.get("passed", 0))
+        r._candidate = cand  # store for downstream consumers
+
+        status = f"{r.cycles:,} cycles, {r.cells:,} cells" if r.passed else "FAIL"
+        print_info(f"HW_LOOP={cand.hw_loop}: {cand.loops_patched} loops, {status}")
+        results.append(r)
+
+    return results
+
+
+def _evaluate_hwloop_via_legacy(cfg, ctx, changeset, candidates, prune_config_orig, all_used_orig):
+    """Legacy per-candidate evaluation loop (the body of
+    ``_sweep_hwloop_candidates`` before Phase 6).
+
+    Kept verbatim here so that ``--use-pipeline-runner=False`` (the
+    default) reproduces the production behaviour the 21-benchmark
+    sweep depends on.
+    """
+    from arvis.cli import print_info
+    from arvis.pipeline import verification
+    from arvis.pipeline.hwloop_sweep import HWLoopSweepResult
+
+    results = []
 
     for cand_idx, cand in enumerate(candidates):
         if not cand.fused_hex:
@@ -1202,16 +1335,7 @@ def _sweep_hwloop_candidates(
         status = f"{r.cycles:,} cycles, {r.cells:,} cells" if r.passed else "FAIL"
         print_info(f"HW_LOOP={cand.hw_loop}: {cand.loops_patched} loops, {status}")
 
-    # Restore
-    changeset.hw_loop_count = saved_hw
-    ctx.fused_hex_path, ctx.fused_elf_path = saved_hex, saved_elf
-    ctx.sim_pruned = saved_sim_pruned
-    ctx.synth_comparison = saved_synth
-
-    # Phase 5: hand off to the unified sweep framework for selection.
-    # The dual-compile + per-candidate sim + synth above produced
-    # the metrics table; the framework now picks the winner.
-    return _select_hwloop_winners(results)
+    return results
 
 
 def _select_hwloop_winners(results):

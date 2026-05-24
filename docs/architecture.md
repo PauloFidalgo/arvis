@@ -392,6 +392,8 @@ The portability layer was introduced incrementally:
 | **3.2 + 3.3** | `7456fad` | All 12 ``RTLChangeSet._apply_*`` private methods promoted to pure free functions in ``targets/cv32e40p/passes.py`` -- the target package is now self-contained. |
 | **4.1 - 4.5** | `5f8eb8b..dd126cb` | Industry-standard hardening: pre-commit hooks (ruff/ruff-format/mypy/codespell), structured logging via ``core/logging_config``, Pydantic v2 ``BaseModel`` for the Decision hierarchy, ``mypy --strict`` clean across 32 source files, **>=90% test coverage** enforced in CI. |
 | **5.1 - 5.7** | next | Generalised hyperparameter-sweep framework (``core/sweep.py``) with 4 search strategies (Grid/Random/Bayesian/Halving) over multi-parameter spaces.  Existing FIFO + HW_LOOP sweeps become 30-line subclasses.  See ``docs/sweep.md``. |
+| **5b** | `4144752` | HW_LOOP sweep selection routed through ``HWLoopDepthSweep``.  ``pick_best`` replaced by ``_select_hwloop_winners`` + ``_print_hwloop_sweep_table`` helpers. |
+| **6** | this | ``--use-pipeline-runner`` gateway routes the HW_LOOP sweep's per-candidate sim+synth through ``Pipeline._emit_variant`` + ``VerilatorVerifier`` + ``YosysSynthesisFlow``.  See ``docs/runner-replacement.md``. |
 
 ### Phase 2.8: the portability gateway
 

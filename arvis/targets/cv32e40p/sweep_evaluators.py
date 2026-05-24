@@ -228,6 +228,150 @@ class HWLoopDepthEvaluator:
         return metrics
 
 
+# ─── Phase 6: Pipeline-driven HW_LOOP evaluator ───────────────────
+
+
+@dataclass
+class HWLoopVariantEvaluator:
+    """Evaluate one HW_LOOP candidate via the unified Pipeline path.
+
+    Replaces the per-candidate sim+synth body of
+    :func:`pipeline.runner._sweep_hwloop_candidates` with a single
+    call that goes through the new
+    :class:`core.verifier.Verifier` /
+    :class:`core.synthesis.SynthesisFlow` interfaces.
+
+    The candidate is expected to carry its own pre-built hex/elf
+    paths (the dual-compile is still upstream of this evaluator,
+    inside ``runner.py``).  The evaluator's job is to:
+
+    1. Build the per-candidate workspace via
+       :class:`Pipeline._emit_variant` so the RTL reflects the
+       chosen ``HW_LOOP`` depth.
+    2. Run :class:`VerilatorVerifier` to measure cycles.
+    3. Run :class:`YosysSynthesisFlow` to measure cells.
+    4. Return the standard ``{cycles, cells, adp, passed}`` dict
+       the sweep framework expects.
+
+    Parameters
+    ----------
+    target:
+        :class:`CV32E40P` instance (or compatible) -- used by
+        :class:`Pipeline._emit_variant` to allocate workspaces.
+    pipeline:
+        Pre-built :class:`core.pipeline.Pipeline` carrying the
+        target + verifier + synthesis flow.  Tests may pass a
+        mock pipeline; the production runner builds one from its
+        :class:`ToolConfig`.
+    output_dir:
+        Where per-candidate workspace artifacts live.  One
+        ``rtl_hwloop_eval_<depth>/`` subdirectory per candidate.
+    hex_path_for:
+        Callable mapping ``(candidate) -> str`` returning the hex
+        file to simulate.  The runner provides this so the
+        evaluator doesn't have to know where ``cand.fused_hex``
+        is stored.
+    base_decisions:
+        Optional dict of pre-built decisions (Prune, Fusion) that
+        the variant should also carry.  The HW_LOOP sweep usually
+        runs after pruning + fusion so the per-candidate variant
+        is the legacy "ALL with depth=N" variant.
+    """
+
+    target: object  # CV32E40P; typed as object to avoid circular import
+    pipeline: object  # core.pipeline.Pipeline
+    output_dir: Path
+    hex_path_for: object  # Callable[[SweepCandidate], str]
+    base_decisions: dict[str, object] = field(default_factory=dict)
+
+    def __call__(self, candidate: SweepCandidate) -> dict[str, float]:
+        from arvis.core.pipeline import VariantConfig
+        from arvis.core.strategy import LoopDecision
+
+        depth = int(candidate["HW_LOOP"])
+
+        # Build a LoopDecision for this candidate; merge with the
+        # base decisions (prune + fusion).
+        decisions_by_kind: dict[str, list[object]] = {
+            kind: [d] for kind, d in self.base_decisions.items()
+        }
+        decisions_by_kind["LoopDecision"] = [
+            LoopDecision(
+                nest_depth=depth,
+                counter_width=12,
+                addr_width=14,
+            )
+        ]
+
+        # The variant config carries every active decision kind.
+        variant = VariantConfig(
+            label=f"hwloop_eval_{depth}",
+            decision_kinds=frozenset(decisions_by_kind.keys()),
+        )
+
+        try:
+            # ``Pipeline._emit_variant`` is a private helper; calling
+            # it here is intentional -- the evaluator is the canonical
+            # consumer of one-variant emission.
+            self.pipeline._output_root_for_workload = (  # type: ignore[attr-defined]
+                lambda wl: self.output_dir
+            )
+            variant_result = self.pipeline._emit_variant(  # type: ignore[attr-defined]
+                variant,
+                decisions_by_kind,
+                workload=None,
+            )
+            rtl_dir = variant_result.rtl_dir
+        except Exception:
+            logger.exception(
+                "HWLoopVariantEvaluator: emit_variant failed for depth=%d",
+                depth,
+            )
+            return {
+                "cycles": 0.0,
+                "cells": 0.0,
+                "adp": float("inf"),
+                "passed": 0.0,
+            }
+
+        # Resolve the hex path for this candidate.
+        try:
+            hex_path = self.hex_path_for(candidate)  # type: ignore[operator]
+        except Exception:
+            logger.exception(
+                "HWLoopVariantEvaluator: hex_path_for failed for depth=%d",
+                depth,
+            )
+            return {
+                "cycles": 0.0,
+                "cells": 0.0,
+                "adp": float("inf"),
+                "passed": 0.0,
+            }
+
+        # Simulate.
+        verifier = self.pipeline.verifier  # type: ignore[attr-defined]
+        sim_result = verifier.simulate(rtl_dir=rtl_dir, hex_path=Path(hex_path))
+        cycles = sim_result.total_cycles if sim_result.test_passed else 0
+        passed = bool(sim_result.test_passed)
+
+        # Synthesize.
+        synth = self.pipeline.synthesis  # type: ignore[attr-defined]
+        cells = 0
+        if synth is not None:
+            synth_result = synth.synthesize(rtl_dir=rtl_dir)
+            if synth_result.cell_count is not None:
+                cells = int(synth_result.cell_count)
+
+        adp = (cycles * cells / 1e9) if (cycles > 0 and cells > 0) else float("inf")
+        return {
+            "cycles": float(cycles),
+            "cells": float(cells),
+            "adp": adp,
+            "passed": float(passed),
+        }
+
+
 # ─── Helpers ──────────────────────────────────────────────────────
 
 
@@ -252,5 +396,6 @@ def _copy_rtl_with_fifo_depth(rtl_root: str, output_dir: str, depth: int) -> Non
 
 __all__ = [
     "HWLoopDepthEvaluator",
+    "HWLoopVariantEvaluator",
     "PrefetchFIFOEvaluator",
 ]

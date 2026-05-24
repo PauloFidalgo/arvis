@@ -173,6 +173,25 @@ class Workload(ABC):
         avoid repeated work.
         """
 
+    # ── Optional: hex-path resolution for Pipeline.run() ─────────
+    def hex_for_variant(self, variant_label: str) -> Path | None:
+        """Return the hex file to simulate for the given variant.
+
+        Phase 6 hook: when a :class:`Pipeline` is wired with a
+        verifier, it calls this method per variant to find the
+        program to load.  The default returns ``None``, which
+        signals "no simulation for this variant" -- safe for
+        workloads that don't support it.
+
+        Concrete implementations typically check
+        ``variant_label`` against known suffixes (``baseline``,
+        ``pruned``, ``fused_pruned``, ``hwloop_pruned``, ``all``)
+        and return the matching pre-built hex from the benchmark
+        directory.
+        """
+        del variant_label
+        return None
+
 
 # ─── Workload suite (for multi-program targets) ────────────────────
 

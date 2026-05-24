@@ -320,16 +320,55 @@ class Pipeline:
                     patch.apply(workspace)
 
         # Verification + synthesis are optional and only run when
-        # the appropriate component is wired.  Hex-path resolution
-        # is workload-specific (the workload knows which hex file
-        # corresponds to ``variant.hex_source``); Phase 2.6 leaves
-        # that as an enhancement -- the smoke path doesn't simulate.
+        # the appropriate component is wired AND the workload can
+        # resolve a hex file for this variant.  The default
+        # workload returns ``None``, which safely skips simulation.
         sim_result = None
         synth_result = None
+        hex_path = None
+
+        try:
+            hex_path = workload.hex_for_variant(variant.label)
+        except Exception:
+            logger.exception(
+                "Soft-skip: workload.hex_for_variant raised for variant %r",
+                variant.label,
+            )
+
+        rtl_dir_for_sim = workspace.output_root / "rtl"
+
+        # Run the verifier when wired and a hex resolved.  Targets
+        # that don't want simulation pass a NullVerifier whose
+        # ``simulate`` returns ``SimResult(test_passed=False)`` --
+        # a benign no-op.
+        if self.verifier is not None and hex_path is not None:
+            try:
+                sim_result = self.verifier.simulate(
+                    rtl_dir=rtl_dir_for_sim,
+                    hex_path=hex_path,
+                )
+            except Exception:
+                logger.exception(
+                    "Soft-skip: verifier.simulate raised for variant %r",
+                    variant.label,
+                )
+
+        # Run synthesis when wired (no hex needed).
+        if self.synthesis is not None:
+            try:
+                synth_result = self.synthesis.synthesize(
+                    rtl_dir=rtl_dir_for_sim,
+                )
+            except Exception:
+                logger.exception(
+                    "Soft-skip: synthesis.synthesize raised for variant %r",
+                    variant.label,
+                )
 
         return VariantResult(
             label=variant.label,
             rtl_dir=workspace.output_root,
+            hex_path=hex_path,
             sim_result=sim_result,
             synth_result=synth_result,
         )

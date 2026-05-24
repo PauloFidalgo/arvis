@@ -214,6 +214,22 @@ Combined:
         ),
     )
 
+    # ── Phase 6: pipeline runner gateway ──
+    parser.add_argument(
+        "--use-pipeline-runner",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL: route the HW_LOOP sweep's per-candidate "
+            "sim+synth through the unified Pipeline._emit_variant + "
+            "VerilatorVerifier + YosysSynthesisFlow path instead of "
+            "the legacy verification.run_synth_step / "
+            "verification.run_post_pruning_check.  Implies "
+            "--use-portability.  Validated end-to-end via "
+            "examples/portability_pipeline_runner_smoke.py."
+        ),
+    )
+
     # ── Phase 4.2: structured logging ──
     parser.add_argument(
         "--log-level",
@@ -279,6 +295,18 @@ Combined:
         import os as _os
 
         _os.environ["ARVIS_USE_PORTABILITY"] = "1"
+
+    # Phase 6 pipeline-runner gateway: when set, the HW_LOOP sweep's
+    # per-candidate sim+synth goes through HWLoopVariantEvaluator +
+    # Pipeline._emit_variant.  Implies --use-portability so the
+    # variant emission also uses the portable path.
+    cfg.use_pipeline_runner = bool(args.use_pipeline_runner)
+    if cfg.use_pipeline_runner:
+        import os as _os
+
+        _os.environ["ARVIS_USE_PIPELINE_RUNNER"] = "1"
+        _os.environ["ARVIS_USE_PORTABILITY"] = "1"
+        cfg.use_portability = True
 
     return cfg
 
