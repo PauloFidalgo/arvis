@@ -280,9 +280,13 @@ def _prevalidate_loops(
     specializer_dir: Path | None = None,
     extra_ldflags: list[str] | None = None,
     baseline_src: Path | None = None,
+    fifo_depth: int | None = None,
 ) -> set:
     """Test each eligible loop individually. Return set of keys that PASS.
-    baseline_src: if provided, use this for the no-loops baseline instead of src_asm."""
+    baseline_src: if provided, use this for the no-loops baseline instead of src_asm.
+    fifo_depth:   when set, loops with body smaller than fifo_depth*4 bytes
+                  are rejected as ineligible (see AsmLoopDetector). Pass
+                  None to skip the check (legacy callers)."""
     import re as _re
 
     from arvis.analysis.hwloop import AsmLoopDetector
@@ -300,7 +304,7 @@ def _prevalidate_loops(
 
     asm_text = src_asm.read_text()
     baseline_text = baseline_src.read_text() if baseline_src and baseline_src.exists() else asm_text
-    det0 = AsmLoopDetector(str(src_asm))
+    det0 = AsmLoopDetector(str(src_asm), fifo_depth=fifo_depth)
     det0.find_all_loops()
     eligible = [l for l in det0.all_loops if l.hw_eligible]
     if not eligible:
@@ -460,12 +464,15 @@ def _patch_asm(
     bm_dir: Path,
     encoding=None,
     valid_loops: set | None = None,
+    fifo_depth: int | None = None,
 ):
-    """Analyze loops and patch a .s file. Returns (patched_path, stats) or (None, None)."""
+    """Analyze loops and patch a .s file. Returns (patched_path, stats) or (None, None).
+    fifo_depth: when set, loops with body smaller than fifo_depth*4 bytes
+                are rejected as ineligible (see AsmLoopDetector)."""
     from arvis.analysis.hwloop import AsmLoopDetector
     from arvis.codegen.hwloop.generator import AsmPatcher, HWLoopGenerator
 
-    det = AsmLoopDetector(str(src_asm))
+    det = AsmLoopDetector(str(src_asm), fifo_depth=fifo_depth)
     det.find_all_loops()
 
     # Filter to only pre-validated loops
@@ -1380,6 +1387,19 @@ def _run_generic_hwloop(
             cnt_width = max(cnt_width, analyze_counter_width(str(src), best.hw_loop))
     changeset.hw_loop_cnt_width = cnt_width
     print_info(f"Counter width: {cnt_width} bits")
+
+    # Address width from compiled ELFs (after patching). LP_start/end/last
+    # only need to span the binary's text section, so we narrow the hwloop
+    # registers to the smallest power of two that fits. Saves FFs and
+    # shortens per-cycle PC-comparison CARRY chains in the controller,
+    # aligner, and prefetch_controller.
+    from arvis.pipeline.hwloop_sweep import analyze_addr_width
+    addr_width = 12
+    for elf in (best.fused_elf, best.plain_elf):
+        if elf and Path(elf).exists():
+            addr_width = max(addr_width, analyze_addr_width(str(elf)))
+    changeset.hw_loop_addr_width = addr_width
+    print_info(f"Address width: {addr_width} bits")
 
     ctx.hwloop_hex_path = best.fused_hex
     ctx.hwloop_elf_path = best.fused_elf

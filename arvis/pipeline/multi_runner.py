@@ -551,12 +551,20 @@ def _run_multi_hwloop(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> N
         print_info(f"  HW_LOOP={hw_val}: {total_patched} loops patched across all programs")
 
     # Analyze counter width from all patched assemblies
-    from arvis.pipeline.hwloop_sweep import analyze_counter_width
+    from arvis.pipeline.hwloop_sweep import analyze_addr_width, analyze_counter_width
 
     for name, asm_path in program_asm.items():
         best_hw = candidates[-1]
         cw = analyze_counter_width(str(asm_path), best_hw)
         max_cnt_width = max(max_cnt_width, cw)
+
+    # Analyze address width from compiled fused ELFs (one per program). The
+    # widest binary across the whole set wins, since the same RTL must
+    # accommodate all of them.
+    max_addr_width = 12
+    for elf_path in fused_elfs.values():
+        if elf_path and Path(elf_path).exists():
+            max_addr_width = max(max_addr_width, analyze_addr_width(str(elf_path)))
 
     # Pick best candidate
     valid = [c for c in ctx.hwloop_candidates if c.loops_patched > 0]
@@ -564,9 +572,10 @@ def _run_multi_hwloop(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> N
         best = max(valid, key=lambda c: c.loops_patched)
         changeset.hw_loop_count = best.hw_loop
         changeset.hw_loop_cnt_width = max_cnt_width
+        changeset.hw_loop_addr_width = max_addr_width
         # Set hwloop_only paths for verification
         ctx.hwloop_only_hex_path = str(bm_dir)  # marker — verification uses per-program
-        print_success(f"Best HW_LOOP={best.hw_loop}, CNT_WIDTH={max_cnt_width}")
+        print_success(f"Best HW_LOOP={best.hw_loop}, CNT_WIDTH={max_cnt_width}, HWLP_ADDR_WIDTH={max_addr_width}")
     else:
         changeset.hw_loop_count = 0
         print_info("No loops patched — HW_LOOP=0")

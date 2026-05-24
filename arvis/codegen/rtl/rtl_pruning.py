@@ -116,6 +116,7 @@ class PruneConfig:
     # ── HW Loop support ──
     hw_loop: int = 0  # 0=disabled, 2-8=number of nested HW loop levels
     hw_loop_cnt_width: int = 32  # counter register width
+    hw_loop_addr_width: int = 32  # LP_start/end/last register width (auto-tuned to fit binary text)
 
     _OPCODE_MAP = {
         "jal": "OPCODE_JAL",
@@ -475,6 +476,8 @@ class PruneConfig:
         params["HW_LOOP"] = self.hw_loop
         if self.hw_loop > 0 and self.hw_loop_cnt_width < 32:
             params["CNT_WIDTH"] = self.hw_loop_cnt_width
+        if self.hw_loop > 0 and self.hw_loop_addr_width < 32:
+            params["HWLP_ADDR_WIDTH"] = self.hw_loop_addr_width
         return params
 
     def verilator_flags(self) -> List[str]:

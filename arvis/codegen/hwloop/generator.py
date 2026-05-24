@@ -513,8 +513,24 @@ class HWLoopGenerator:
                 return None
         count_reg, calc_insns = result
 
-        # Determine offset encoding based on last instruction(s)
-        offset_enc = 0  # penultimate detection not used in zero-overhead approach
+        # Determine offset encoding based on last body instruction size.
+        # ARVIS Phase 4 (RTL pnult): the RTL pre-computes LP_last_addr =
+        # LP_end - (last_is_4byte ? 4 : 2) at hwloop setup. Bit
+        # instr[7+hw_loop_bits] of the lp.count instruction tells the RTL
+        # whether the last body instruction is 4-byte (bit=1) or 2-byte
+        # compressed (bit=0). Setting this correctly is mandatory: an
+        # incorrect bit causes DEC to fire one instruction off, breaking
+        # the loop.
+        #
+        # Subtlety: the .s file uses uncompressed mnemonics like `addi`/`add`
+        # even when the assembler would later emit them as RV32C 2-byte
+        # forms. AsmInstruction.size_bytes only sees the mnemonic, so it
+        # cannot tell which `addi` will compress. To make the bit
+        # deterministic, the patcher wraps the last body instruction in
+        # `.option push; .option norvc; ...; .option pop` (see
+        # _build_insertion_map), forcing it to 4 bytes regardless of
+        # operands. Therefore we always set offset_enc = 1 here.
+        offset_enc = 1
 
         return HWLoopConfig(
             loop=loop,
@@ -1521,6 +1537,29 @@ class AsmPatcher:
                 end_label = f"{loop.start_label}_hwend:"
                 back_line = loop.back_branch_line
 
+                # ARVIS Phase 4: force the last body instruction to 4 bytes by
+                # wrapping it in `.option push; .option norvc; ...; .option pop`.
+                # This makes the patcher's pnult bit (always set to 1 = 4-byte)
+                # match the assembler's encoding deterministically. Without this,
+                # operand-driven RV32C compression on instructions like `addi`
+                # would silently turn the last body insn into 2 bytes, causing
+                # the RTL to compute the wrong LP_last_addr and break the loop.
+                #
+                # NOTE: body_instructions[-1] is the back-edge branch which the
+                # patcher REMOVES, so the actual last body insn after patching
+                # is body_instructions[-2].
+                if len(loop.body_instructions) >= 2:
+                    last_insn = loop.body_instructions[-2]
+                    last_line = last_insn.line_num
+                    if not last_insn.mnemonic.startswith("c."):
+                        if last_line not in self.insertions_before:
+                            self.insertions_before[last_line] = []
+                        self.insertions_before[last_line].insert(0, "    .option push")
+                        self.insertions_before[last_line].append("    .option norvc  # ARVIS Phase 4: keep last body insn at 4B for pnult")
+                        if last_line not in self.insertions_after:
+                            self.insertions_after[last_line] = []
+                        self.insertions_after[last_line].insert(0, "    .option pop")
+
                 if back_line not in self.insertions_after:
                     self.insertions_after[back_line] = []
 
@@ -1685,20 +1724,57 @@ def main():
     # Parse --exclude=fn1,fn2,... and --only=fn1,fn2,...
     exclude_fns: Set[str] = set()
     only_fns: Optional[Set[str]] = None
+    fifo_depth: Optional[int] = None
+    encoding: Optional["HWLoopEncoding"] = None
     for arg in sys.argv[4:]:
         if arg.startswith("--exclude="):
             exclude_fns.update(arg[len("--exclude=") :].split(","))
         elif arg.startswith("--only="):
             only_fns = set(arg[len("--only=") :].split(","))
+        elif arg.startswith("--fifo-depth="):
+            # Reject loops whose body is smaller than fifo_depth*4 bytes;
+            # they can't be safely converted to hwloops because the
+            # speculative prefetcher accumulates wrap fetches that
+            # corrupt the body's accumulator after the loop exits.
+            fifo_depth = int(arg[len("--fifo-depth=") :])
+        elif arg.startswith("--opcode="):
+            # Override hwloop opcode for all four instruction kinds
+            # (bounds/count/start/end). Useful when ARVIS-pruned RTL
+            # places hwloop in CUSTOM_0 (0x0B) instead of CUSTOM_3 (0x7B).
+            if encoding is None:
+                encoding = HWLoopEncoding()
+            opc = int(arg[len("--opcode=") :], 0)
+            encoding.bounds_opcode = opc
+            encoding.count_opcode = opc
+            encoding.start_opcode = opc
+            encoding.end_opcode = opc
+        elif arg.startswith("--funct3="):
+            # Comma-separated bounds,count,start,end funct3 values, e.g.
+            # --funct3=0,1,3,4 for the edn-pruned RTL.
+            if encoding is None:
+                encoding = HWLoopEncoding()
+            parts = arg[len("--funct3=") :].split(",")
+            if len(parts) != 4:
+                raise SystemExit("--funct3 needs 4 comma-separated values: bounds,count,start,end")
+            encoding.bounds_funct3 = int(parts[0], 0)
+            encoding.count_funct3  = int(parts[1], 0)
+            encoding.start_funct3  = int(parts[2], 0)
+            encoding.end_funct3    = int(parts[3], 0)
 
     print(f"Analyzing {asm_file}...")
-    detector = AsmLoopDetector(asm_file)
+    detector = AsmLoopDetector(asm_file, fifo_depth=fifo_depth)
     loops = detector.find_all_loops()
 
     print(f"Found {len(loops)} loops, {sum(1 for l in loops if l.hw_eligible)} HW-eligible")
+    if fifo_depth is not None:
+        rejected = [l for l in loops if not l.hw_eligible
+                    and "body_size_eligible" in l.failing_constraints]
+        if rejected:
+            print(f"  ({len(rejected)} loops rejected for body_size < {fifo_depth*4} bytes)")
     print()
 
-    generator = HWLoopGenerator(detector, hw_loop=hw_loop, exclude_fns=exclude_fns, only_fns=only_fns)
+    generator = HWLoopGenerator(detector, hw_loop=hw_loop, exclude_fns=exclude_fns, only_fns=only_fns,
+                                encoding=encoding)
     groups = generator.generate()
 
     print(f"Generated {len(groups)} HW loop groups")

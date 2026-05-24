@@ -381,6 +381,7 @@ def _run_verification(
         cs4 = RTLChangeSet()
         cs4.hw_loop_count = hw
         cs4.hw_loop_cnt_width = changeset.hw_loop_cnt_width
+        cs4.hw_loop_addr_width = changeset.hw_loop_addr_width
         cs4.prefetch_fifo_depth = changeset.prefetch_fifo_depth
         if prune_config_hwonly is not None:
             cs4.add_prune_config(copy.deepcopy(prune_config_hwonly), set(all_used_hwonly))
@@ -468,11 +469,17 @@ def _run_verification(
                             encoding=_enc_plain,
                             image=None,
                             specializer_dir=Path(__file__).resolve().parent.parent,
+                            fifo_depth=changeset.prefetch_fifo_depth or None,
                         )
                         if not _valid:
                             continue
                         _out = f"{_prog}_hw{hw}_{tag}_{_psrc.stem}_validated.s"
-                        _patched, _ = _patch_asm(_psrc, _out, hw, _bm_dir, encoding=_enc_plain, valid_loops=_valid)
+                        _patched, _ = _patch_asm(
+                            _psrc, _out, hw, _bm_dir,
+                            encoding=_enc_plain,
+                            valid_loops=_valid,
+                            fifo_depth=changeset.prefetch_fifo_depth or None,
+                        )
                         if not _patched:
                             continue
                         _elf = f"{_prog}_hw{hw}_{tag}_{_psrc.stem}_validated.elf"
@@ -596,6 +603,7 @@ def _run_verification(
                         encoding=_enc_fused,
                         image=FUSED_IMAGE,
                         specializer_dir=Path(__file__).resolve().parent.parent,
+                        fifo_depth=changeset.prefetch_fifo_depth or None,
                     )
                     if _valid:
                         _out = f"{_prog}_hw{hw}_{tag}_validated.s"
@@ -606,6 +614,7 @@ def _run_verification(
                             _bm_dir,
                             encoding=_enc_fused,
                             valid_loops=_valid,
+                            fifo_depth=changeset.prefetch_fifo_depth or None,
                         )
                         if _patched:
                             _elf = f"{_prog}_hw{hw}_{tag}_validated.elf"

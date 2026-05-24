@@ -94,6 +94,12 @@ class AsmInstruction:
         return self.mnemonic in BRANCH_MNEMONICS
 
     @property
+    def size_bytes(self) -> int:
+        """Encoded length of the instruction. Compressed mnemonics (RV32C,
+        prefix `c.`) are 2 bytes; everything else is 4 bytes."""
+        return 2 if self.mnemonic.startswith("c.") else 4
+
+    @property
     def is_call(self) -> bool:
         """True if this is a function call."""
         if self.mnemonic in ("call", "tail"):
@@ -414,6 +420,12 @@ class AsmLoop:
             return True
         return any(child.tree_has_calls for child in self.children)
 
+    @property
+    def body_size_bytes(self) -> int:
+        """Encoded byte length of the body (sum of each instruction's
+        size, accounting for RV32C compressed forms)."""
+        return sum(insn.size_bytes for insn in self.body_instructions)
+
     def contains(self, other: "AsmLoop") -> bool:
         """True if this loop's line range contains the other loop's range."""
         # Same start label = same loop with multiple back-edges, not parent/child
@@ -441,11 +453,18 @@ class AsmFunction:
 class AsmLoopDetector:
     """Detects loops in GCC-generated .s files by finding backward label references."""
 
-    def __init__(self, asm_path: str):
+    def __init__(self, asm_path: str, fifo_depth: Optional[int] = None):
         self.asm_path = Path(asm_path)
         self.lines: List[str] = []
         self.functions: List[AsmFunction] = []
         self.all_loops: List[AsmLoop] = []
+        # ARVIS: prefetch FIFO depth (auto-tuned by the prefetch sweep).
+        # When set, loops with body smaller than fifo_depth*4 bytes are
+        # rejected by the eligibility check, because the prefetcher's
+        # speculative wrap fetches would replay the body after exit (see
+        # body_1 case in the hwloop regression suite). Pass None to skip
+        # the check (legacy behaviour).
+        self.fifo_depth: Optional[int] = fifo_depth
 
     def find_all_loops(self) -> List[AsmLoop]:
         """Main entry point: parse the .s file and find all loops."""
@@ -854,8 +873,49 @@ class AsmLoopDetector:
             self._check_inner_sw_loops(loop)
             self._detect_prologue_jump(loop)
             self._check_no_internal_jumps(loop)
+            self._check_body_size_eligible(loop)
 
             loop.hw_eligible = len(loop.failing_constraints) == 0
+
+    def _check_body_size_eligible(self, loop: AsmLoop) -> None:
+        """Reject loops whose body is too small for the prefetch FIFO.
+
+        The CV32E40P prefetcher fetches up to FIFO_DEPTH words ahead
+        speculatively. For loops with body_size_bytes < FIFO_DEPTH * 4
+        the wrap path keeps multiple outstanding LP_start fetches in
+        flight; once the loop exits, those responses arrive after the
+        last DEC and execute the body one or more extra times,
+        corrupting any accumulator. The prefetcher has no general way
+        to invalidate them after the fact (see the body_1 timeout in
+        the regression suite for the canonical failure mode).
+
+        For loops below this threshold, the SW loop equivalent (counter
+        register + back-branch) costs the same number of cycles per
+        iteration as a synchronous-fetch HW loop would, so there is no
+        performance benefit either way. Reject and let the SW loop run.
+
+        The check is only enforced when self.fifo_depth is set; if not
+        provided (legacy callers), the constraint is recorded as a
+        no-op so existing flows are not affected.
+        """
+        if self.fifo_depth is None or self.fifo_depth <= 0:
+            loop.constraint_results["body_size_eligible"] = {
+                "passed": True,
+                "skipped": True,
+            }
+            return
+
+        threshold = self.fifo_depth * 4
+        size = loop.body_size_bytes
+        passed = size >= threshold
+        loop.constraint_results["body_size_eligible"] = {
+            "passed": passed,
+            "body_size_bytes": size,
+            "threshold_bytes": threshold,
+            "fifo_depth": self.fifo_depth,
+        }
+        if not passed:
+            loop.failing_constraints.append("body_size_eligible")
 
     def _check_inner_sw_loops(self, loop: AsmLoop) -> None:
         """SW inner loops are allowed thanks to the deferred-DEC RTL fix.

@@ -52,6 +52,7 @@ class RTLChangeSet:
     # ── From HW loop phase ──
     hw_loop_count: int = 0  # 0=disabled, 2-8=number of nested loop levels
     hw_loop_cnt_width: int = 32  # counter register width (auto-tuned from benchmark)
+    hw_loop_addr_width: int = 32  # LP_start/end/last register width (auto-tuned to fit binary text)
 
     # ── From bottleneck analysis ──
     prefetch_fifo_depth: int = 0  # 0=don't change, 2-8=set FIFO_DEPTH
@@ -151,6 +152,7 @@ class RTLChangeSet:
         if self.prune_config is not None and self.hw_loop_count > 0:
             self.prune_config.hw_loop = self.hw_loop_count
             self.prune_config.hw_loop_cnt_width = self.hw_loop_cnt_width
+            self.prune_config.hw_loop_addr_width = self.hw_loop_addr_width
 
         # ── Step 1: Fresh copy from original RTL ──
         label = getattr(self, "_apply_label", None)
@@ -287,6 +289,12 @@ class RTLChangeSet:
                     new_text = _re.sub(
                         r"parameter\s+CNT_WIDTH\s*=\s*\d+",
                         f"parameter CNT_WIDTH = {self.hw_loop_cnt_width}",
+                        new_text,
+                    )
+                if self.hw_loop_addr_width < 32:
+                    new_text = _re.sub(
+                        r"parameter\s+HWLP_ADDR_WIDTH\s*=\s*\d+",
+                        f"parameter HWLP_ADDR_WIDTH = {self.hw_loop_addr_width}",
                         new_text,
                     )
                 if new_text != text:

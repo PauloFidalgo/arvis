@@ -166,3 +166,73 @@ def analyze_counter_width(asm_path: str, hw_loop: int, margin_bits: int = 1) -> 
 
     width = max_count.bit_length() + margin_bits
     return max(8, min(32, width))
+
+
+def analyze_addr_width(elf_path: str, margin_bits: int = 1) -> int:
+    """Determine minimum HWLP_ADDR_WIDTH for a compiled binary.
+
+    The hwloop_regs registers (LP_start, LP_end, LP_last) only need to
+    hold addresses inside the binary's text section. Narrowing them
+    saves FFs and shortens the per-cycle PC-comparison CARRY chains in
+    the controller, aligner, and prefetch_controller.
+
+    Strategy: read the ELF, find the highest virtual address used by
+    code (top of .text or any other executable section), and return
+    ``clog2(max_addr + 1) + margin``. The margin guards against
+    relocation rounding or compiler tweaks producing slightly higher
+    addresses on a re-build.
+
+    Args:
+        elf_path: Path to a compiled ELF that targets the same memory
+            layout as the synthesis target.
+        margin_bits: Extra bits beyond the strictly-required width.
+
+    Returns:
+        Optimal HWLP_ADDR_WIDTH (minimum 12 — the smallest realistic
+        text section, maximum 32 — original behaviour).
+    """
+    import subprocess
+
+    # Look at the highest end-of-section address among executable sections
+    # (.text, .text.*, .init, .fini etc). objdump -h is portable across
+    # different toolchain installs (we already shell out to riscv32-objdump
+    # elsewhere in the pipeline, so it's available).
+    try:
+        out = subprocess.check_output(
+            ["riscv32-unknown-elf-objdump", "-h", elf_path],
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return 32  # conservative fallback if objdump is missing
+
+    max_end = 0
+    for line in out.splitlines():
+        # Lines look like:  N .text   00000DEADBEEF  00000000  00000000  ...
+        # Section flags appear on the next line. We just grab any line
+        # with a numeric size + LMA we can parse.
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        try:
+            size = int(parts[2], 16)
+            lma = int(parts[3], 16)
+        except ValueError:
+            continue
+        # Heuristic filter: only count code-bearing sections that PC can
+        # reach during execution (.text*, .init, .fini, .plt). Data
+        # sections like .rodata/.data/.bss are not PC targets even if
+        # they sit at higher addresses, so they don't constrain hwloop
+        # address widths.
+        name = parts[1]
+        if not (name.startswith(".text") or name in (".init", ".fini", ".plt")):
+            continue
+        end = lma + size
+        if end > max_end:
+            max_end = end
+
+    if max_end <= 0:
+        return 32  # couldn't parse; play it safe
+
+    width = max_end.bit_length() + margin_bits
+    return max(12, min(32, width))
