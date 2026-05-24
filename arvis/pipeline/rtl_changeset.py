@@ -54,6 +54,9 @@ class RTLChangeSet:
     hw_loop_cnt_width: int = 32  # counter register width (auto-tuned from benchmark)
     hw_loop_addr_width: int = 32  # LP_start/end/last register width (auto-tuned to fit binary text)
 
+    # ── From PC narrowing analysis ──
+    pc_width: int = 0  # 0=disabled (no narrowing), 8-32=narrow main PC pipeline to N bits
+
     # ── From bottleneck analysis ──
     prefetch_fifo_depth: int = 0  # 0=don't change, 2-8=set FIFO_DEPTH
 
@@ -326,6 +329,24 @@ class RTLChangeSet:
         # ── Step 5: Encoding optimization (after ALL other modifications) ──
         if has_real_pruning:
             self._apply_encoding_optimization(ws, verbose=verbose)
+
+        # ── Step 6: PC pipeline narrowing (last — operates on the final
+        #           emitted tree, after pruning/decoder/fusion/encoding) ──
+        # arvis.pipeline.pc_width.patch_rtl_dir is idempotent and safe
+        # to call on any cv32e40p RTL tree. It adds
+        # ``parameter PC_WIDTH = N`` to every relevant module, narrows
+        # internal PC signals to ``[PC_WIDTH-1:0]``, and inserts
+        # zero-extends/truncations at the OBI/regfile/CSR boundaries.
+        # Only runs when explicitly requested (pc_width > 0).
+        if self.pc_width > 0 and self.pc_width < 32:
+            try:
+                from arvis.pipeline.pc_width import patch_rtl_dir as _patch_pc
+                rtl_dir = ws.output_root / "rtl"
+                _patch_pc(rtl_dir, self.pc_width)
+                _print_info(f"PC narrowing: PC_WIDTH = {self.pc_width} bits")
+            except Exception as e:
+                from arvis.cli import print_warning
+                print_warning(f"PC narrowing skipped: {e}")
 
         n_fused = len(self.fused_operations)
         has_prune = self.prune_config is not None and (

@@ -54,6 +54,15 @@ def run_pipeline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
     if "pruning" in cfg.enabled_phases:
         prune_config_orig, all_used_orig, prune_config_hwonly, all_used_hwonly = _run_pruning(cfg, ctx, changeset)
 
+    # ── PC pipeline narrowing analysis ──
+    # Compute optimal PC_WIDTH from the widest binary the pipeline will
+    # run.  The same RTL must accommodate every variant (baseline,
+    # fused-only, hwloop-only, fused+hwloop), so we take the max across
+    # whichever ELFs are available at this point.  This sets one
+    # ``changeset.pc_width`` value that flows into every sub-changeset
+    # (cs2/cs3/cs4/cs5) inside _run_verification.
+    changeset.pc_width = _compute_pc_width(ctx, fused_only_elf)
+
     # ── Verification ──
     if "pruning" in cfg.enabled_phases:
         _run_verification(
@@ -245,6 +254,46 @@ def _run_fusion(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> None:
             ctx._rtl_changeset_fused_ops = fused_ops  # type: ignore[attr-defined]
 
 
+def _compute_pc_width(ctx: "PipelineContext", fused_only_elf=None) -> int:
+    """Compute the optimal PC_WIDTH for whichever benchmark ELFs exist.
+
+    Mirrors :func:`arvis.pipeline.hwloop_sweep.analyze_addr_width` but for
+    the main PC pipeline rather than the hwloop registers.  We take the
+    max over every variant the pipeline will run (baseline, fused-only,
+    hwloop-only, fused+hwloop) so the same RTL accommodates all of them.
+
+    Returns 0 when no ELF is available, which signals "don't narrow"
+    to :class:`RTLChangeSet`.
+    """
+    try:
+        from arvis.pipeline.pc_width import analyze_pc_width
+    except ImportError:
+        return 0
+
+    candidates = [
+        ctx.fused_elf_path,
+        ctx.hwloop_elf_path,
+        ctx.hwloop_only_elf_path,
+        fused_only_elf,
+    ]
+    seen: set[str] = set()
+    width = 0
+    for elf in candidates:
+        if not elf:
+            continue
+        elf_str = str(elf)
+        if elf_str in seen or not Path(elf_str).exists():
+            continue
+        seen.add(elf_str)
+        try:
+            w = analyze_pc_width(elf_str)
+            if w > width:
+                width = w
+        except Exception:
+            continue
+    return width
+
+
 def _run_pruning(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> tuple:
     from arvis.cli import print_info
     from arvis.pipeline.pruning import compute_prune_config
@@ -351,6 +400,7 @@ def _run_verification(
         changeset_prune.add_prune_config(copy.deepcopy(prune_config_orig), set(all_used_orig))
     else:
         changeset_prune.add_prune_config(copy.deepcopy(changeset.prune_config), set(changeset.used_instructions))
+    changeset_prune.pc_width = changeset.pc_width
     changeset_prune._apply_label = "pruned"
     changeset_prune.apply(cfg, ctx, verbose=False)
     verification.run_synthesis(cfg, ctx)
@@ -362,6 +412,7 @@ def _run_verification(
         cs3 = RTLChangeSet()
         cs3.hw_loop_count = 0
         cs3.prefetch_fifo_depth = changeset.prefetch_fifo_depth
+        cs3.pc_width = changeset.pc_width
         cs3.add_fused_operations(changeset.fused_operations)
         cs3.add_prune_config(copy.deepcopy(changeset.prune_config), set(changeset.used_instructions))
         cs3._apply_label = "fused_pruned"
@@ -404,6 +455,7 @@ def _run_verification(
         cs4.hw_loop_cnt_width = changeset.hw_loop_cnt_width
         cs4.hw_loop_addr_width = changeset.hw_loop_addr_width
         cs4.prefetch_fifo_depth = changeset.prefetch_fifo_depth
+        cs4.pc_width = changeset.pc_width
         if prune_config_hwonly is not None:
             cs4.add_prune_config(copy.deepcopy(prune_config_hwonly), set(all_used_hwonly))
         elif prune_config_orig is not None:

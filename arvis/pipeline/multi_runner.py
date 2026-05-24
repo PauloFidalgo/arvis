@@ -566,6 +566,22 @@ def _run_multi_hwloop(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> N
         if elf_path and Path(elf_path).exists():
             max_addr_width = max(max_addr_width, analyze_addr_width(str(elf_path)))
 
+    # PC pipeline width — same logic as analyze_addr_width but for the
+    # main PC (pc_if/pc_id/pc_q/branch_addr_n/mepc/uepc) rather than the
+    # hwloop registers. We narrow once to the widest binary so the same
+    # RTL fits every variant emitted by the multi-program build.
+    try:
+        from arvis.pipeline.pc_width import analyze_pc_width
+        max_pc_width = 0
+        for elf_path in fused_elfs.values():
+            if elf_path and Path(elf_path).exists():
+                max_pc_width = max(max_pc_width, analyze_pc_width(str(elf_path)))
+        if max_pc_width > 0:
+            changeset.pc_width = max_pc_width
+            print_info(f"PC width: {max_pc_width} bits (auto-tuned)")
+    except ImportError:
+        pass  # arvis.pipeline.pc_width not importable; leave changeset.pc_width = 0
+
     # Pick best candidate
     valid = [c for c in ctx.hwloop_candidates if c.loops_patched > 0]
     if valid:
