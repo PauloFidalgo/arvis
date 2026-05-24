@@ -24,12 +24,22 @@ don't share state.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import List, Mapping, Tuple
+from typing import TYPE_CHECKING
 
 from arvis.core.isa import ISADescriptor
+from arvis.core.strategy import FusionDecision, LoopDecision
 from arvis.core.target import CoreParameter, OpcodeSlot, OpcodeSpace, TargetCore
 
+if TYPE_CHECKING:
+    from arvis.core.pipeline import VariantConfig
+    from arvis.core.rtl_patch import RTLPatch, RTLWorkspace
+    from arvis.core.strategy import (
+        Decision,
+        PruneDecision,
+        WidthDecision,
+    )
 
 # ─── R4-type encoding constants (mirrored from peephole_gen) ───────
 #
@@ -38,7 +48,7 @@ from arvis.core.target import CoreParameter, OpcodeSlot, OpcodeSpace, TargetCore
 # replicate the constants here so the target can describe its
 # encoding space without reaching into the toolchain code.
 
-_R4_OPCODES: Tuple[int, ...] = (0x0B, 0x2B, 0x5B, 0x7B)  # CUSTOM_0..3
+_R4_OPCODES: tuple[int, ...] = (0x0B, 0x2B, 0x5B, 0x7B)  # CUSTOM_0..3
 _R4_FUNCT3_PER_OPCODE = 8
 _R4_FUNCT2_PER_FUNCT3 = 4
 _R4_SLOTS_PER_OPCODE = _R4_FUNCT3_PER_OPCODE * _R4_FUNCT2_PER_FUNCT3  # 32
@@ -46,7 +56,7 @@ _R4_TOTAL = len(_R4_OPCODES) * _R4_SLOTS_PER_OPCODE  # 128
 _R4_HWLOOP_RESERVED_TAIL = 2  # bounds + count instructions per nest level
 
 
-def _build_r4_slots() -> List[OpcodeSlot]:
+def _build_r4_slots() -> list[OpcodeSlot]:
     """Build all 128 R4-type slots in canonical iteration order.
 
     The order is: opcode-major, funct3-major-within-opcode,
@@ -55,7 +65,7 @@ def _build_r4_slots() -> List[OpcodeSlot]:
     allocates the first N slots agrees with the legacy allocator on
     which N opcodes get used.
     """
-    slots: List[OpcodeSlot] = []
+    slots: list[OpcodeSlot] = []
     for opcode in _R4_OPCODES:
         for funct3 in range(_R4_FUNCT3_PER_OPCODE):
             for funct2 in range(_R4_FUNCT2_PER_FUNCT3):
@@ -86,7 +96,7 @@ class CV32E40P(TargetCore):
     # Parameter defaults match ``cv32e40p_top.sv``'s parameter list.
     # When ARVIS narrows them, it does so per-variant by emitting an
     # override; the defaults here represent the unspecialized core.
-    _PARAMETERS: Tuple[CoreParameter, ...] = (
+    _PARAMETERS: tuple[CoreParameter, ...] = (
         CoreParameter(
             name="HW_LOOP",
             default=0,
@@ -141,7 +151,7 @@ class CV32E40P(TargetCore):
     def rtl_root(self) -> Path:
         return self._rtl_root
 
-    def synthesizable_files(self) -> List[Path]:
+    def synthesizable_files(self) -> list[Path]:
         """The RTL files that make up the synthesizable core.
 
         Mirrors what ``cv32e40p_manifest.flist`` lists, minus
@@ -181,7 +191,7 @@ class CV32E40P(TargetCore):
         ]
 
     # ── Parameters ─────────────────────────────────────────────────
-    def parameters(self) -> List[CoreParameter]:
+    def parameters(self) -> list[CoreParameter]:
         return list(self._PARAMETERS)
 
     # ── Encoding ───────────────────────────────────────────────────
@@ -201,7 +211,7 @@ class CV32E40P(TargetCore):
         # expose that via :meth:`reserve_hwloop_slots` when the
         # allocator integration lands in Phase 2.  For now, simply
         # exclude them from the default front-allocator.
-        usable = all_slots[: -_R4_HWLOOP_RESERVED_TAIL]
+        usable = all_slots[:-_R4_HWLOOP_RESERVED_TAIL]
         return OpcodeSpace(name="cv32e40p-R4", available=usable)
 
     # ── Memory layout ──────────────────────────────────────────────
@@ -215,7 +225,7 @@ class CV32E40P(TargetCore):
         return 0x80
 
     @property
-    def memory_layout(self) -> Mapping[str, Tuple[int, int]]:
+    def memory_layout(self) -> Mapping[str, tuple[int, int]]:
         """Symbolic ``{region: (start, size)}`` map.
 
         The standard testbench uses a single contiguous memory
@@ -239,7 +249,9 @@ class CV32E40P(TargetCore):
     # other three roles still inherit no-op stubs from TargetCore
     # (see Phase 2.2-2.4 for their implementations).
 
-    def render_width_decision(self, decision, workspace):
+    def render_width_decision(
+        self, decision: WidthDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         """Render a :class:`WidthDecision` to a list of patches.
 
         Returns a single :class:`WidthNarrowingPatch` carrying all
@@ -251,7 +263,9 @@ class CV32E40P(TargetCore):
 
         return [WidthNarrowingPatch(decision=decision)]
 
-    def render_prune_decision(self, decision, workspace):
+    def render_prune_decision(
+        self, decision: PruneDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         """Render a :class:`PruneDecision` to a list of patches.
 
         Returns a single :class:`PrunePatch`.  The patch
@@ -265,7 +279,9 @@ class CV32E40P(TargetCore):
 
         return [PrunePatch(decision=decision)]
 
-    def render_fusion_decision(self, decision, workspace):
+    def render_fusion_decision(
+        self, decision: FusionDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         """Render a :class:`FusionDecision` to a list of patches.
 
         Returns a single :class:`FusionPatch`.  Empty decisions
@@ -280,7 +296,9 @@ class CV32E40P(TargetCore):
 
         return [FusionPatch(decision=decision)]
 
-    def render_loop_decision(self, decision, workspace):
+    def render_loop_decision(
+        self, decision: LoopDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         """Render a :class:`LoopDecision` to a list of patches.
 
         Returns a single :class:`LoopPatch`.  Handles both the
@@ -294,7 +312,10 @@ class CV32E40P(TargetCore):
 
     # ── Per-variant workspace metadata + pre-patch processing ────
     def allocate_workspace_metadata(
-        self, variant, decisions_by_kind, workspace
+        self,
+        variant: VariantConfig,
+        decisions_by_kind: Mapping[str, list[Decision]],
+        workspace: RTLWorkspace,
     ) -> None:
         """Compute per-variant shared state and run pre-patch
         processing.
@@ -318,21 +339,27 @@ class CV32E40P(TargetCore):
            it keeps the right blocks active.
         """
         from arvis.targets.cv32e40p.encoding import (
-            allocate_for_variant,
             WORKSPACE_REGISTRY_KEY,
+            allocate_for_variant,
         )
 
-        # Pick relevant decisions.
-        fusion_decision = None
-        loop_decision = None
+        # Pick relevant decisions.  Each ``decisions_by_kind[K]``
+        # value is a list of :class:`Decision` instances; we type-
+        # narrow each to its concrete subclass before use.
+        fusion_decision: FusionDecision | None = None
+        loop_decision: LoopDecision | None = None
         if variant.includes("FusionDecision"):
             fdl = decisions_by_kind.get("FusionDecision", [])
             if fdl:
-                fusion_decision = fdl[0]
+                cand = fdl[0]
+                if isinstance(cand, FusionDecision):
+                    fusion_decision = cand
         if variant.includes("LoopDecision"):
             ldl = decisions_by_kind.get("LoopDecision", [])
             if ldl:
-                loop_decision = ldl[0]
+                cand = ldl[0]
+                if isinstance(cand, LoopDecision):
+                    loop_decision = cand
 
         # ── Encoding registry ──
         registry = allocate_for_variant(fusion_decision, loop_decision)
@@ -345,7 +372,5 @@ class CV32E40P(TargetCore):
         # reintroduce the markers).  Skip for BASELINE since the
         # pragma processor wouldn't run there anyway.
         if variant.decision_kinds:
-            nest_depth = (
-                loop_decision.nest_depth if loop_decision is not None else 0
-            )
+            nest_depth = loop_decision.nest_depth if loop_decision is not None else 0
             workspace.metadata["cv32e40p_hw_loop_count"] = nest_depth

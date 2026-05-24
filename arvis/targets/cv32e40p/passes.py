@@ -28,24 +28,29 @@ optional: the caller knows exactly what the variant needs.
 
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, List
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from arvis.core.rtl_patch import RTLWorkspace
+
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Public API ────────────────────────────────────────────────────
 
 
 def apply_hwloop_pragmas(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     *,
     hw_loop_count: int,
     hwlp_encoding: Any | None = None,
     verbose: bool = False,
-) -> List[Any]:
+) -> list[Any]:
     """Process every ``ARVIS_HWLP`` pragma in the workspace.
 
     Stripped behaviour at ``hw_loop_count == 0``: the processor
@@ -81,9 +86,7 @@ def apply_hwloop_pragmas(
     if not rtl_dir.exists():
         return []
 
-    proc = HWLoopPragmaProcessor(
-        hw_loop=hw_loop_count, hwlp_encoding=hwlp_encoding
-    )
+    proc = HWLoopPragmaProcessor(hw_loop=hw_loop_count, hwlp_encoding=hwlp_encoding)
     return proc.process_dir(rtl_dir)
 
 
@@ -114,13 +117,13 @@ def clear_fused_pragmas(rtl_dir: Path) -> None:
 
 
 def apply_fusion_patches(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     *,
     fused_operations: Iterable[Any] = (),
     registry: Any | None = None,
     hwlp_encoding: Any | None = None,
     hw_loop_count: int = 0,
-    fusion_applied_callback=None,
+    fusion_applied_callback: Callable[[], None] | None = None,
 ) -> bool:
     """Inject fused-instruction RTL into the (already pruned) workspace.
 
@@ -221,18 +224,16 @@ def apply_fusion_patches(
 
     # ── Step 3: inject hwloop OPCODE_CUSTOM_* decoder entries.
     if registry is not None:
-        gen._hwloop_registry_entries = registry.hwloop_instructions
+        gen._hwloop_registry_entries = registry.hwloop_instructions  # type: ignore[attr-defined]
         if registry.hwloop_instructions:
-            try:
-                from arvis.cli import print_info
-
-                for e in registry.hwloop_instructions:
-                    print_info(
-                        f"  HWLoop decoder entry: {e.name} → "
-                        f"0x{e.opcode:02x} f3={e.funct3} f2={e.funct2}"
-                    )
-            except Exception:
-                pass  # best-effort logging only
+            for e in registry.hwloop_instructions:
+                logger.info(
+                    "HWLoop decoder entry: %s -> 0x%02x f3=%s f2=%s",
+                    e.name,
+                    e.opcode,
+                    e.funct3,
+                    e.funct2,
+                )
 
     # ── Step 4: emit the patches.
     gen.write()
@@ -261,24 +262,24 @@ def apply_fusion_patches(
         try:
             fusion_applied_callback()
         except Exception:
-            pass  # callback is best-effort
+            logger.exception("Soft-skip: fusion_applied_callback raised; ignoring")
 
     return True
 
 
 __all__ = [
-    "apply_hwloop_pragmas",
-    "apply_fusion_patches",
-    "clear_fused_pragmas",
-    "apply_feature_pragmas",
-    "apply_debug_pragmas",
-    "apply_pulp_pragmas",
-    "apply_irq_pragmas",
     "apply_ctrl_pragmas",
-    "apply_pulp_pragmas_on_dir",
     "apply_ctrl_pragmas_on_dir",
     "apply_dce_cleanup",
+    "apply_debug_pragmas",
     "apply_encoding_optimization",
+    "apply_feature_pragmas",
+    "apply_fusion_patches",
+    "apply_hwloop_pragmas",
+    "apply_irq_pragmas",
+    "apply_pulp_pragmas",
+    "apply_pulp_pragmas_on_dir",
+    "clear_fused_pragmas",
 ]
 
 
@@ -286,14 +287,14 @@ __all__ = [
 
 
 def apply_feature_pragmas(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     *,
     feature: str,
     enabled: bool,
     level: int,
-    generators: dict,
-    extra_dirs: List[str] | None = None,
-) -> List[Any]:
+    generators: dict[str, Any],
+    extra_dirs: list[str] | None = None,
+) -> list[Any]:
     """Process ``ARVIS_<feature>`` pragmas across the workspace.
 
     The feature primitive: looks up named generators, expands the
@@ -340,9 +341,7 @@ def apply_feature_pragmas(
     return all_stats
 
 
-def apply_debug_pragmas(
-    workspace: "RTLWorkspace", *, enable_debug: bool
-) -> List[Any]:
+def apply_debug_pragmas(workspace: RTLWorkspace, *, enable_debug: bool) -> list[Any]:
     """Process ARVIS_DBG pragmas (RISC-V debug / JTAG infrastructure)."""
     from arvis.codegen.rtl.debug_pragma import DBG_GENERATORS
 
@@ -356,9 +355,7 @@ def apply_debug_pragmas(
     )
 
 
-def apply_pulp_pragmas(
-    workspace: "RTLWorkspace", *, corev_pulp: int
-) -> List[Any]:
+def apply_pulp_pragmas(workspace: RTLWorkspace, *, corev_pulp: int) -> list[Any]:
     """Process ARVIS_PULP pragmas (PULP custom instructions)."""
     from arvis.codegen.rtl.pulp_pragma import PULP_GENERATORS
 
@@ -371,9 +368,7 @@ def apply_pulp_pragmas(
     )
 
 
-def apply_irq_pragmas(
-    workspace: "RTLWorkspace", *, enable_interrupts: bool
-) -> List[Any]:
+def apply_irq_pragmas(workspace: RTLWorkspace, *, enable_interrupts: bool) -> list[Any]:
     """Process ARVIS_IRQ pragmas (interrupt controller)."""
     from arvis.codegen.rtl.irq_pragma import IRQ_GENERATORS
 
@@ -388,7 +383,7 @@ def apply_irq_pragmas(
 
 
 def apply_ctrl_pragmas(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     *,
     enable_interrupts: bool,
     enable_debug: bool,
@@ -419,17 +414,17 @@ def apply_ctrl_pragmas(
         re.DOTALL,
     )
 
-    def _replacer(match: re.Match) -> str:
+    def _replacer(match: re.Match[str]) -> str:
         nonlocal total_processed
         indent = match.group(1)
         name = match.group(2)
         gen = CTRL_GENERATORS.get(name)
         if gen is None:
-            return match.group(0)  # unknown pragma: keep
+            return str(match.group(0))  # unknown pragma: keep
         result = gen(enable_interrupts, enable_debug, indent)
         total_processed += 1
         if result is None:
-            return match.group(0)  # generator says "keep original"
+            return str(match.group(0))  # generator says "keep original"
         if result == "":
             return ""  # generator says "delete the block"
         return f"{indent}{result.rstrip()}\n"
@@ -441,11 +436,11 @@ def apply_ctrl_pragmas(
 
 
 def apply_pulp_pragmas_on_dir(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     target_dir: Path,
     *,
     corev_pulp: int,
-) -> List[Any]:
+) -> list[Any]:
     """Same as :func:`apply_pulp_pragmas` but scoped to one directory.
 
     Used for the ``rtl/include/`` subdirectory which holds
@@ -466,7 +461,7 @@ def apply_pulp_pragmas_on_dir(
 
 
 def apply_ctrl_pragmas_on_dir(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     target_dir: Path,
     *,
     enable_interrupts: bool,
@@ -485,15 +480,15 @@ def apply_ctrl_pragmas_on_dir(
         text = sv_file.read_text()
         original = text
 
-        def _replacer(match: re.Match) -> str:
+        def _replacer(match: re.Match[str]) -> str:
             indent = match.group(1)
             name = match.group(2)
             gen = CTRL_GENERATORS.get(name)
             if gen is None:
-                return match.group(0)
+                return str(match.group(0))
             result = gen(enable_interrupts, enable_debug, indent)
             if result is None:
-                return match.group(0)
+                return str(match.group(0))
             if result == "":
                 return ""
             return f"{indent}{result.rstrip()}\n"
@@ -506,7 +501,7 @@ def apply_ctrl_pragmas_on_dir(
 # ─── Cleanup passes ───────────────────────────────────────────────
 
 
-def apply_dce_cleanup(workspace: "RTLWorkspace") -> List[Any]:
+def apply_dce_cleanup(workspace: RTLWorkspace) -> list[Any]:
     """Iteratively remove dead signal declarations and assignments.
 
     Wraps :func:`codegen.rtl.pyslang_dce.run_dce_on_directory`.  All
@@ -518,18 +513,13 @@ def apply_dce_cleanup(workspace: "RTLWorkspace") -> List[Any]:
         from arvis.codegen.rtl.pyslang_dce import run_dce_on_directory
 
         return run_dce_on_directory(rtl_dir)
-    except Exception as e:
-        try:
-            from arvis.cli import print_warning
-
-            print_warning(f"DCE cleanup skipped: {e}")
-        except Exception:
-            pass
+    except Exception:
+        logger.warning("DCE cleanup skipped", exc_info=True)
         return []
 
 
 def apply_encoding_optimization(
-    workspace: "RTLWorkspace",
+    workspace: RTLWorkspace,
     *,
     removable_mul_modes: Iterable[str] = (),
     verbose: bool = False,
@@ -553,7 +543,7 @@ def apply_encoding_optimization(
         return None
 
     output_root = Path(workspace.output_root)
-    forced_unused: dict = {}
+    forced_unused: dict[str, set[str]] = {}
     mul = list(removable_mul_modes)
     if mul:
         forced_unused["mul_opcode_e"] = set(mul)
@@ -566,11 +556,6 @@ def apply_encoding_optimization(
             forced_unused=forced_unused if forced_unused else None,
             verbose=verbose,
         )
-    except Exception as e:
-        try:
-            from arvis.cli import print_warning
-
-            print_warning(f"Encoding optimization skipped: {e}")
-        except Exception:
-            pass
+    except Exception:
+        logger.warning("Encoding optimization skipped", exc_info=True)
         return None

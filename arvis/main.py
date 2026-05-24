@@ -214,7 +214,26 @@ Combined:
         ),
     )
 
+    # ── Phase 4.2: structured logging ──
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
+        help=(
+            "Log level for the new packages (core/, strategies/, "
+            "targets/, workloads/).  The legacy ``cli.print_*`` "
+            "helpers always print regardless; this only affects "
+            "the structured-logging output."
+        ),
+    )
+
     args = parser.parse_args()
+
+    # Configure structured logging FIRST, so any message emitted
+    # while we build the config is captured at the requested level.
+    from arvis.core.logging_config import configure_logging, parse_log_level
+
+    configure_logging(level=parse_log_level(args.log_level))
 
     # ── Build config ──
     if args.benchmark:
@@ -290,9 +309,11 @@ def main():
     # ── Run pipeline ──
     if cfg.is_suite:
         from arvis.pipeline.multi_runner import run_suite_pipeline
+
         run_suite_pipeline(cfg, ctx)
     else:
         from arvis.pipeline.runner import run_pipeline
+
         run_pipeline(cfg, ctx)
 
 

@@ -1,0 +1,65 @@
+# Pre-commit hook configuration for ARVIS.
+#
+# Install with::
+#
+#     pre-commit install
+#
+# Then every ``git commit`` will run the hooks below on the
+# staged files.  CI runs the same hooks on every push so a
+# clean local commit and a clean CI run give the same answer.
+#
+# Hook selection rationale
+# ------------------------
+# * ``ruff`` covers black + isort + flake8 + pyupgrade in a
+#   single tool, an order of magnitude faster.  Two passes:
+#   the linter (with ``--fix``) and the formatter.
+# * ``mypy`` runs on the new packages only (the project's
+#   ``pyproject.toml`` configures the strict scope).  Legacy
+#   code is left at the loose default to avoid scope creep.
+# * ``codespell`` catches typos in docstrings and comments.
+# * ``check-merge-conflict`` and ``end-of-file-fixer`` are the
+#   pre-commit baseline hooks.
+---
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.svg$|/rtl/.*\.sv$|/rtl_modified/.*\.sv$'
+      - id: end-of-file-fixer
+        exclude: '\.svg$|/rtl/.*\.sv$|/rtl_modified/.*\.sv$'
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=2000"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.0
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.19.1
+    hooks:
+      - id: mypy
+        # Phase 4.4: mypy is now a default-stage hook on the new
+        # packages (core/, strategies/, targets/, workloads/).
+        # Strict mode is enforced via pyproject.toml's per-module
+        # overrides.  Vendored upstream cv32e40p files (ci/, docs/,
+        # util/, scripts/) are excluded because they're third-party
+        # code we don't own.
+        args: ["--follow-imports=silent"]
+        files: '^(core|strategies|workloads)/|^targets/cv32e40p/(passes|patches|portability_shim|encoding|variants|core|__init__)\.py$'
+        additional_dependencies:
+          - "pydantic>=2.0"
+          - "types-pyyaml"
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.3.0
+    hooks:
+      - id: codespell
+        args: ["--ignore-words-list=hsi,fo,ot,nd,ba,inout"]
+        exclude: '/rtl/|/rtl_modified/|\.hex$|\.elf$|\.s$'

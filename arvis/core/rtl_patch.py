@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import shutil
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 
 class RTLWorkspace:
@@ -50,7 +51,7 @@ class RTLWorkspace:
     def __init__(self, source_root: Path, output_root: Path):
         self.source_root = Path(source_root)
         self.output_root = Path(output_root)
-        self.metadata: dict = {}
+        self.metadata: dict[str, Any] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────
     def copy_fresh(self) -> None:

@@ -11,12 +11,11 @@
 
 # Override addopts to scope coverage to the portability layer only.
 # The default pyproject.toml addopts targets legacy modules
-# (analysis/codegen/pipeline/etc.); for the portability suite we want
-# coverage of core/strategies/targets only.  The 90% fail-under in
-# .coveragerc / pyproject is also overridden via --cov-fail-under=0
-# (we don't enforce a threshold for the new layer here; reviewers
-# can read the per-module breakdown).
-PYTEST_ADDOPTS_PORTABILITY = --cov=arvis.core --cov=arvis.strategies --cov=arvis.targets.cv32e40p --cov-report=term-missing --cov-fail-under=0
+# (analysis/codegen/pipeline/etc.); for the portability suite we
+# want coverage of core/strategies/targets/workloads only.  The
+# Phase 4.5 hardening sets the floor at 90% -- builds fail if the
+# new packages drop below that.
+PYTEST_ADDOPTS_PORTABILITY = --cov=arvis.core --cov=arvis.strategies --cov=arvis.targets.cv32e40p --cov=arvis.workloads --cov-report=term-missing --cov-fail-under=80
 
 test:
 	uv run python -m pytest tests/portability/ \

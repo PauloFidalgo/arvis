@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 from arvis.core.strategy import FusionDecision, FusionStrategy
 
@@ -47,14 +47,14 @@ class _CtxShim:
     """Subset of :class:`pipeline.context.PipelineContext` that
     :func:`compute_filtered_ops` actually reads."""
 
-    fused_elf_path: Optional[str] = None
-    fused_hex_path: Optional[str] = None
-    fused_asm_path: Optional[str] = None
-    gcc_compile_result: Optional[object] = None
-    all_fusions: Optional[object] = None
-    _fusion_rtl_fused_ops: Optional[list] = None
+    fused_elf_path: str | None = None
+    fused_hex_path: str | None = None
+    fused_asm_path: str | None = None
+    gcc_compile_result: object | None = None
+    all_fusions: object | None = None
+    _fusion_rtl_fused_ops: list[Any] | None = None
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> None:
         # Anything else accessed via getattr() returns None.  The
         # legacy code typically guards with hasattr or `or`, so
         # None is a safe default.
@@ -92,7 +92,7 @@ class NGramFusion(FusionStrategy):
     def name(self) -> str:
         return "ngram-fusion"
 
-    def applicable(self, workload: "Workload", target: "TargetCore") -> bool:
+    def applicable(self, workload: Workload, target: TargetCore) -> bool:
         # Fusion is meaningful for any target with a non-empty
         # custom-opcode space.  A target that exposes zero R4 slots
         # would skip fusion automatically.
@@ -104,9 +104,9 @@ class NGramFusion(FusionStrategy):
 
     def analyze(
         self,
-        workload: "Workload",
-        profile: "WorkloadProfile",
-        target: "TargetCore",
+        workload: Workload,
+        profile: WorkloadProfile,
+        target: TargetCore,
     ) -> FusionDecision:
         from arvis.pipeline import fusion_rtl
 
@@ -117,7 +117,7 @@ class NGramFusion(FusionStrategy):
         # ELF is present we return an empty decision rather than
         # aborting -- this matches the legacy path's "no fusion
         # candidates" outcome.
-        fused_elf: Optional[Path] = None
+        fused_elf: Path | None = None
         for elf in profile.elf_paths:
             if elf is None:
                 continue
@@ -138,7 +138,10 @@ class NGramFusion(FusionStrategy):
         )
 
         try:
-            fused_ops = fusion_rtl.compute_filtered_ops(cfg, ctx)
+            fused_ops = fusion_rtl.compute_filtered_ops(
+                cfg,  # type: ignore[arg-type]  # _CfgShim duck-types ToolConfig
+                ctx,  # type: ignore[arg-type]  # _CtxShim duck-types PipelineContext
+            )
         except Exception:
             # Strategies cannot abort the pipeline; an analysis
             # failure becomes "no fusions".

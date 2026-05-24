@@ -30,13 +30,10 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
 )
 
 from arvis.core.workload import (
@@ -53,10 +50,10 @@ if TYPE_CHECKING:
 # ─── Default exclusion list ────────────────────────────────────────
 
 
-DEFAULT_EXCLUDED_ELF_SUBSTRINGS: Tuple[str, ...] = (
-    "spike",          # spike ISA simulator builds (different memory layout)
-    ".baseline",      # snapshots of an earlier baseline build
-    "_baseline_",     # alternate baseline naming
+DEFAULT_EXCLUDED_ELF_SUBSTRINGS: tuple[str, ...] = (
+    "spike",  # spike ISA simulator builds (different memory layout)
+    ".baseline",  # snapshots of an earlier baseline build
+    "_baseline_",  # alternate baseline naming
 )
 
 
@@ -97,17 +94,15 @@ class BenchmarkWorkload(Workload):
         self,
         bench_dir: Path,
         *,
-        name: Optional[str] = None,
-        cflags: Optional[Sequence[str]] = None,
-        expected: Optional[ExpectedResult] = None,
-        exclude_elf_substrings: Tuple[str, ...] = DEFAULT_EXCLUDED_ELF_SUBSTRINGS,
+        name: str | None = None,
+        cflags: Sequence[str] | None = None,
+        expected: ExpectedResult | None = None,
+        exclude_elf_substrings: tuple[str, ...] = DEFAULT_EXCLUDED_ELF_SUBSTRINGS,
         objdump_binary: str = "riscv32-unknown-elf-objdump",
     ) -> None:
         bench_dir = Path(bench_dir)
         if not bench_dir.exists():
-            raise FileNotFoundError(
-                f"Benchmark directory not found: {bench_dir}"
-            )
+            raise FileNotFoundError(f"Benchmark directory not found: {bench_dir}")
         self._bench_dir = bench_dir
         self._name = name if name is not None else bench_dir.name
         self._cflags = list(cflags) if cflags is not None else ["-O2"]
@@ -126,7 +121,7 @@ class BenchmarkWorkload(Workload):
         return self._bench_dir
 
     @property
-    def cflags(self) -> List[str]:
+    def cflags(self) -> list[str]:
         return list(self._cflags)
 
     @property
@@ -134,7 +129,7 @@ class BenchmarkWorkload(Workload):
         return self._expected
 
     @property
-    def sources(self) -> List[Path]:
+    def sources(self) -> list[Path]:
         """Every ``.c`` / ``.s`` / ``.S`` file in the benchmark directory."""
         return sorted(
             list(self._bench_dir.glob("*.c"))
@@ -152,7 +147,7 @@ class BenchmarkWorkload(Workload):
         )
 
     # ── Profile ────────────────────────────────────────────────────
-    def profile(self, toolchain: "Toolchain") -> WorkloadProfile:
+    def profile(self, toolchain: Toolchain) -> WorkloadProfile:
         """Collect ELFs and (best-effort) instruction histogram.
 
         ``toolchain`` is part of the abstract contract but unused
@@ -169,11 +164,11 @@ class BenchmarkWorkload(Workload):
         )
 
     # ── Helpers ────────────────────────────────────────────────────
-    def _collect_elfs(self) -> Tuple[Path, ...]:
+    def _collect_elfs(self) -> tuple[Path, ...]:
         """Sorted, deduplicated tuple of in-scope ELFs."""
         candidates = sorted(self._bench_dir.glob("*.elf"))
-        kept: List[Path] = []
-        seen: set = set()
+        kept: list[Path] = []
+        seen: set[str] = set()
         for elf in candidates:
             if any(s in elf.name for s in self.exclude_elf_substrings):
                 continue
@@ -184,7 +179,7 @@ class BenchmarkWorkload(Workload):
             kept.append(elf)
         return tuple(kept)
 
-    def _compute_histogram(self, elfs: Sequence[Path]) -> dict:
+    def _compute_histogram(self, elfs: Sequence[Path]) -> dict[str, int]:
         """Disassemble the most representative ELF and tally
         mnemonics.
 
@@ -196,11 +191,7 @@ class BenchmarkWorkload(Workload):
         if not elfs:
             return {}
         fused = next(
-            (
-                e
-                for e in elfs
-                if "fused" in e.name and "baseline" not in e.name
-            ),
+            (e for e in elfs if "fused" in e.name and "baseline" not in e.name),
             None,
         )
         chosen = fused if fused is not None else elfs[0]
@@ -216,7 +207,7 @@ class BenchmarkWorkload(Workload):
         except (subprocess.SubprocessError, FileNotFoundError):
             return {}
 
-        counter: Counter = Counter()
+        counter: Counter[str] = Counter()
         for line in out.splitlines():
             # objdump disassembly lines look like:
             #     80000010:   00102023            sw      zero,0(zero)
@@ -233,7 +224,7 @@ class BenchmarkWorkload(Workload):
             counter[mnemonic] += 1
         return dict(counter)
 
-    def _resolve_objdump(self) -> Optional[str]:
+    def _resolve_objdump(self) -> str | None:
         """Return a callable objdump binary path or None."""
         if shutil.which(self.objdump_binary):
             return self.objdump_binary

@@ -27,10 +27,9 @@ to the legacy path.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any
 
 from arvis.core.strategy import PruneDecision, PruningStrategy
 
@@ -57,13 +56,13 @@ class _CtxShim:
     """Subset of :class:`pipeline.context.PipelineContext` that
     :func:`compute_prune_config` actually reads."""
 
-    fused_elf_path: Optional[str] = None
+    fused_elf_path: str | None = None
     prune_config: object = None  # written by compute_prune_config
 
     # Other ctx fields are accessed via getattr(ctx, name, default)
     # in the legacy code; we let __getattr__ return None for any
     # field we haven't predicted.
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> None:
         return None
 
 
@@ -103,7 +102,7 @@ class UsageDrivenPruner(PruningStrategy):
     def name(self) -> str:
         return "usage-driven-pruner"
 
-    def applicable(self, workload: "Workload", target: "TargetCore") -> bool:
+    def applicable(self, workload: Workload, target: TargetCore) -> bool:
         # Pruning is meaningful for any cv32e40p-shaped target.  We
         # use parameter-presence as a soft proxy: a target that
         # exposes HW_LOOP belongs to the cv32e40p family today.  A
@@ -113,9 +112,9 @@ class UsageDrivenPruner(PruningStrategy):
 
     def analyze(
         self,
-        workload: "Workload",
-        profile: "WorkloadProfile",
-        target: "TargetCore",
+        workload: Workload,
+        profile: WorkloadProfile,
+        target: TargetCore,
     ) -> PruneDecision:
         from arvis.pipeline.pruning import compute_prune_config
 
@@ -125,7 +124,7 @@ class UsageDrivenPruner(PruningStrategy):
         # baseline ELF is used.  The profile carries every variant
         # ELF; we pick the first one whose name is not the
         # baseline, falling back to the only ELF available.
-        chosen_elf: Optional[Path] = None
+        chosen_elf: Path | None = None
         for elf in profile.elf_paths:
             if elf is None or not Path(str(elf)).exists():
                 continue
@@ -157,7 +156,9 @@ class UsageDrivenPruner(PruningStrategy):
         # tuple and translate.
         try:
             prune_config, used_instructions = compute_prune_config(
-                cfg, ctx, verbose=self.verbose
+                cfg,  # type: ignore[arg-type]  # _CfgShim duck-types ToolConfig
+                ctx,  # type: ignore[arg-type]  # _CtxShim duck-types PipelineContext
+                verbose=self.verbose,
             )
         except Exception:
             # Strategies are not allowed to abort the pipeline.  An
@@ -169,7 +170,7 @@ class UsageDrivenPruner(PruningStrategy):
 
     # ── PruneConfig -> PruneDecision translation ──────────────────
     @staticmethod
-    def _translate(prune_config, used_instructions) -> PruneDecision:
+    def _translate(prune_config: Any, used_instructions: set[str]) -> PruneDecision:
         """Translate the legacy :class:`PruneConfig` value object
         into the typed :class:`PruneDecision`.
 
@@ -182,18 +183,10 @@ class UsageDrivenPruner(PruningStrategy):
         by ``examples/portability_equivalence.py``.
         """
         removable_alu_ops = frozenset(getattr(prune_config, "removable_alu_ops", set()))
-        removable_mul_modes = frozenset(
-            getattr(prune_config, "removable_mul_modes", set())
-        )
-        removable_opcode_groups = frozenset(
-            getattr(prune_config, "removable_opcode_groups", set())
-        )
-        removable_csr_labels = frozenset(
-            getattr(prune_config, "removable_csr_labels", set())
-        )
-        removable_csr_storage = frozenset(
-            getattr(prune_config, "removable_csr_storage", set())
-        )
+        removable_mul_modes = frozenset(getattr(prune_config, "removable_mul_modes", set()))
+        removable_opcode_groups = frozenset(getattr(prune_config, "removable_opcode_groups", set()))
+        removable_csr_labels = frozenset(getattr(prune_config, "removable_csr_labels", set()))
+        removable_csr_storage = frozenset(getattr(prune_config, "removable_csr_storage", set()))
 
         # Collect all enable_* flags into a dict.  This is forward-
         # compatible: when new flags are added to PruneConfig they
@@ -222,9 +215,7 @@ class UsageDrivenPruner(PruningStrategy):
                 target_overlay[attr] = value
 
         # Register-level analysis.
-        unused_registers = tuple(
-            sorted(getattr(prune_config, "unused_registers", []))
-        )
+        unused_registers = tuple(sorted(getattr(prune_config, "unused_registers", [])))
         used_regs_mask = int(getattr(prune_config, "used_regs_mask", 0xFFFFFFFF))
 
         return PruneDecision(

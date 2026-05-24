@@ -21,28 +21,27 @@ variants are described as data
 
 from __future__ import annotations
 
-from abc import ABC
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
 )
 
 if TYPE_CHECKING:
     from arvis.core.reporter import Reporter
+    from arvis.core.rtl_patch import RTLWorkspace
     from arvis.core.strategy import Decision, OptimizationStrategy
     from arvis.core.synthesis import SynthesisFlow, SynthResult
     from arvis.core.target import TargetCore
     from arvis.core.toolchain import Toolchain
-    from arvis.core.verifier import Verifier, SimResult
+    from arvis.core.verifier import SimResult, Verifier
     from arvis.core.workload import Workload
+
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Variant configuration ─────────────────────────────────────────
@@ -82,7 +81,7 @@ class VariantConfig:
     """
 
     label: str
-    decision_kinds: frozenset = field(default_factory=frozenset)
+    decision_kinds: frozenset[str] = field(default_factory=frozenset)
     hex_source: str = "baseline"
 
     def includes(self, decision_class_name: str) -> bool:
@@ -108,9 +107,9 @@ class VariantResult:
 
     label: str
     rtl_dir: Path
-    hex_path: Optional[Path] = None
-    sim_result: Optional["SimResult"] = None
-    synth_result: Optional["SynthResult"] = None
+    hex_path: Path | None = None
+    sim_result: SimResult | None = None
+    synth_result: SynthResult | None = None
 
 
 @dataclass
@@ -124,9 +123,9 @@ class PipelineResult:
 
     workload_name: str
     target_name: str
-    decisions: Dict[str, "Decision"] = field(default_factory=dict)
-    variants: List[VariantResult] = field(default_factory=list)
-    extra: Dict[str, Any] = field(default_factory=dict)
+    decisions: dict[str, Decision] = field(default_factory=dict)
+    variants: list[VariantResult] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 # ─── Pipeline ──────────────────────────────────────────────────────
@@ -146,12 +145,12 @@ class Pipeline:
 
     def __init__(
         self,
-        target: "TargetCore",
-        toolchain: "Toolchain",
-        strategies: Sequence["OptimizationStrategy"],
-        verifier: "Verifier",
-        synthesis: Optional["SynthesisFlow"] = None,
-        reporter: Optional["Reporter"] = None,
+        target: TargetCore,
+        toolchain: Toolchain,
+        strategies: Sequence[OptimizationStrategy[Decision]],
+        verifier: Verifier,
+        synthesis: SynthesisFlow | None = None,
+        reporter: Reporter | None = None,
         variants: Sequence[VariantConfig] = (),
     ) -> None:
         self.target = target
@@ -164,7 +163,7 @@ class Pipeline:
 
     # ── Strategy ordering ──────────────────────────────────────────
     @staticmethod
-    def _strategy_order_key(strategy: "OptimizationStrategy") -> int:
+    def _strategy_order_key(strategy: OptimizationStrategy[Decision]) -> int:
         """Default strategy ordering.
 
         Fusion runs before pruning because the prune analysis needs
@@ -196,12 +195,12 @@ class Pipeline:
             return 3
         return 99  # unknown role goes last
 
-    def ordered_strategies(self) -> List["OptimizationStrategy"]:
+    def ordered_strategies(self) -> list[OptimizationStrategy[Decision]]:
         """Return the strategy list in canonical execution order."""
         return sorted(self.strategies, key=self._strategy_order_key)
 
     # ── Run ────────────────────────────────────────────────────────
-    def run(self, workload: "Workload") -> PipelineResult:
+    def run(self, workload: Workload) -> PipelineResult:
         """Run the pipeline against a single workload.
 
         Two modes:
@@ -231,7 +230,7 @@ class Pipeline:
             from arvis.core.workload import WorkloadProfile
 
             profile = WorkloadProfile()
-            extras: Dict[str, Any] = {"profile_error": repr(exc)}
+            extras: dict[str, Any] = {"profile_error": repr(exc)}
         else:
             extras = {}
 
@@ -248,9 +247,7 @@ class Pipeline:
             try:
                 decision = strategy.analyze(workload, profile, self.target)
             except Exception as exc:
-                result.extra.setdefault("strategy_errors", {})[
-                    strategy.name
-                ] = repr(exc)
+                result.extra.setdefault("strategy_errors", {})[strategy.name] = repr(exc)
                 continue
             result.decisions[strategy.name] = decision
 
@@ -262,7 +259,7 @@ class Pipeline:
         # decisions[name] -> Decision; we want type_name -> [Decision].
         from collections import defaultdict
 
-        decisions_by_kind: Dict[str, list] = defaultdict(list)
+        decisions_by_kind: dict[str, list[Decision]] = defaultdict(list)
         for d in result.decisions.values():
             decisions_by_kind[type(d).__name__].append(d)
 
@@ -270,9 +267,7 @@ class Pipeline:
             try:
                 vr = self._emit_variant(variant, decisions_by_kind, workload)
             except Exception as exc:
-                result.extra.setdefault("variant_errors", {})[
-                    variant.label
-                ] = repr(exc)
+                result.extra.setdefault("variant_errors", {})[variant.label] = repr(exc)
                 continue
             result.variants.append(vr)
 
@@ -289,8 +284,8 @@ class Pipeline:
     def _emit_variant(
         self,
         variant: VariantConfig,
-        decisions_by_kind: Dict[str, list],
-        workload: "Workload",
+        decisions_by_kind: dict[str, list[Decision]],
+        workload: Workload,
     ) -> VariantResult:
         """Render and apply patches for one variant."""
         from arvis.core.rtl_patch import RTLWorkspace
@@ -342,8 +337,8 @@ class Pipeline:
     def _populate_workspace_metadata(
         self,
         variant: VariantConfig,
-        decisions_by_kind: Dict[str, list],
-        workspace,
+        decisions_by_kind: dict[str, list[Decision]],
+        workspace: RTLWorkspace,
     ) -> None:
         """Hook for the target to compute per-variant shared state.
 
@@ -363,10 +358,13 @@ class Pipeline:
         try:
             hook(variant, decisions_by_kind, workspace)
         except Exception:
-            # Mirror the strategy/patch error policy: don't abort.
-            pass
+            logger.exception(
+                "Soft-skip: target.allocate_workspace_metadata raised "
+                "for variant %r; continuing with empty metadata",
+                variant.label,
+            )
 
-    def _output_root_for_workload(self, workload: "Workload") -> "Path":
+    def _output_root_for_workload(self, workload: Workload) -> Path:
         """Where this pipeline writes per-variant directories.
 
         Default: ``output/{workload.name}_specialized``.  Phase 2.7

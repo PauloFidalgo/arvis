@@ -29,10 +29,12 @@ byte-identical.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List
+from typing import TYPE_CHECKING, Any
 
+from arvis.core.pipeline import VariantConfig
 from arvis.core.rtl_patch import RTLWorkspace
 from arvis.core.strategy import (
     Decision,
@@ -41,11 +43,13 @@ from arvis.core.strategy import (
     PruneDecision,
     WidthDecision,
 )
-from arvis.core.pipeline import VariantConfig
 
 if TYPE_CHECKING:
     from arvis.pipeline.rtl_changeset import RTLChangeSet
     from arvis.targets.cv32e40p.core import CV32E40P
+
+
+logger = logging.getLogger(__name__)
 
 
 # Canonical ordering -- mirrors :class:`core.pipeline.Pipeline`.
@@ -60,7 +64,7 @@ _PATCH_ORDER: tuple[str, ...] = (
 # ─── Decision builders from a legacy RTLChangeSet ─────────────────
 
 
-def _build_prune_decision(cs: "RTLChangeSet") -> PruneDecision | None:
+def _build_prune_decision(cs: RTLChangeSet) -> PruneDecision | None:
     """Translate ``cs.prune_config`` + ``cs.used_instructions``
     into a :class:`PruneDecision`.
 
@@ -77,7 +81,7 @@ def _build_prune_decision(cs: "RTLChangeSet") -> PruneDecision | None:
     # :attr:`PruneDecision.feature_flags`.  ``prune_*`` flags
     # do NOT belong here; they're target-private knobs read by
     # the legacy code only.
-    feature_flags: Dict[str, bool] = {}
+    feature_flags: dict[str, bool] = {}
     for attr in dir(pc):
         if attr.startswith("enable_") and not attr.startswith("_"):
             value = getattr(pc, attr, None)
@@ -88,7 +92,7 @@ def _build_prune_decision(cs: "RTLChangeSet") -> PruneDecision | None:
     # fields PruneConfig holds (corev_pulp, fpu, hw_loop_*, ...).
     # The set of attributes mirrors UsageDrivenPruner's
     # canonical list.
-    target_overlay: Dict[str, Any] = {}
+    target_overlay: dict[str, Any] = {}
     for attr in (
         "corev_pulp",
         "fpu",
@@ -104,12 +108,12 @@ def _build_prune_decision(cs: "RTLChangeSet") -> PruneDecision | None:
             target_overlay[attr] = value
 
     return PruneDecision(
-        removable_alu_ops=tuple(sorted(pc.removable_alu_ops)),
-        removable_mul_modes=tuple(sorted(pc.removable_mul_modes)),
-        removable_opcode_groups=tuple(sorted(pc.removable_opcode_groups)),
-        removable_csr_labels=tuple(sorted(getattr(pc, "removable_csr_labels", set()))),
-        removable_csr_storage=tuple(sorted(getattr(pc, "removable_csr_storage", set()))),
-        used_instructions=tuple(sorted(cs.used_instructions)),
+        removable_alu_ops=frozenset(pc.removable_alu_ops),
+        removable_mul_modes=frozenset(pc.removable_mul_modes),
+        removable_opcode_groups=frozenset(pc.removable_opcode_groups),
+        removable_csr_labels=frozenset(getattr(pc, "removable_csr_labels", set())),
+        removable_csr_storage=frozenset(getattr(pc, "removable_csr_storage", set())),
+        used_instructions=frozenset(cs.used_instructions),
         unused_registers=tuple(getattr(pc, "unused_registers", []) or []),
         used_regs_mask=getattr(pc, "used_regs_mask", 0),
         feature_flags=feature_flags,
@@ -117,7 +121,7 @@ def _build_prune_decision(cs: "RTLChangeSet") -> PruneDecision | None:
     )
 
 
-def _build_fusion_decision(cs: "RTLChangeSet") -> FusionDecision | None:
+def _build_fusion_decision(cs: RTLChangeSet) -> FusionDecision | None:
     """Translate ``cs.fused_operations`` into a :class:`FusionDecision`.
 
     Returns ``None`` when there are no fused ops (the FusionPatch
@@ -129,7 +133,7 @@ def _build_fusion_decision(cs: "RTLChangeSet") -> FusionDecision | None:
     return FusionDecision(fused_ops=tuple(fused))
 
 
-def _build_loop_decision(cs: "RTLChangeSet") -> LoopDecision | None:
+def _build_loop_decision(cs: RTLChangeSet) -> LoopDecision | None:
     """Translate ``cs.hw_loop_count`` into a :class:`LoopDecision`.
 
     Returns ``None`` when ``hw_loop_count == 0`` (no loop strategy
@@ -144,7 +148,7 @@ def _build_loop_decision(cs: "RTLChangeSet") -> LoopDecision | None:
     )
 
 
-def _build_width_decision(cs: "RTLChangeSet") -> WidthDecision | None:
+def _build_width_decision(cs: RTLChangeSet) -> WidthDecision | None:
     """Translate ``cs.pc_width`` + ``cs.prefetch_fifo_depth`` into a
     :class:`WidthDecision`.
 
@@ -167,9 +171,7 @@ def _build_width_decision(cs: "RTLChangeSet") -> WidthDecision | None:
 # ─── Variant config synthesis ─────────────────────────────────────
 
 
-def _synth_variant_config(
-    label: str, decisions: Dict[str, Decision]
-) -> VariantConfig:
+def _synth_variant_config(label: str, decisions: dict[str, Decision]) -> VariantConfig:
     """Build a :class:`VariantConfig` whose ``decision_kinds`` is
     exactly the set of kinds present in ``decisions``.
 
@@ -178,7 +180,7 @@ def _synth_variant_config(
     matches what cs._apply_label / ctx.rtl_output_dir already
     encode in the legacy path.
     """
-    kinds: FrozenSet[str] = frozenset(decisions.keys())
+    kinds: frozenset[str] = frozenset(decisions.keys())
     return VariantConfig(label=label, decision_kinds=kinds)
 
 
@@ -186,11 +188,11 @@ def _synth_variant_config(
 
 
 def emit_via_portability(
-    cs: "RTLChangeSet",
+    cs: RTLChangeSet,
     cfg: Any,
     ctx: Any,
     *,
-    target: "CV32E40P | None" = None,
+    target: CV32E40P | None = None,
     verbose: bool = False,
 ) -> None:
     """Emit a variant's RTL via the portable :class:`Pipeline` path.
@@ -232,7 +234,7 @@ def emit_via_portability(
     ctx.rtl_output_dir = str(rtl_output_dir)
 
     # ── 3. Build Decisions ───────────────────────────────────────
-    decisions: Dict[str, Decision] = {}
+    decisions: dict[str, Decision] = {}
 
     p = _build_prune_decision(cs)
     if p is not None:
@@ -242,9 +244,9 @@ def emit_via_portability(
     if f is not None:
         decisions["FusionDecision"] = f
 
-    l = _build_loop_decision(cs)
-    if l is not None:
-        decisions["LoopDecision"] = l
+    loop = _build_loop_decision(cs)
+    if loop is not None:
+        decisions["LoopDecision"] = loop
 
     w = _build_width_decision(cs)
     if w is not None:
@@ -266,20 +268,21 @@ def emit_via_portability(
 
     # Stash the hw_loop count where the patches expect it.  The
     # equivalence test does this identically.
-    workspace.metadata["cv32e40p_hw_loop_count"] = (
-        decisions.get("LoopDecision").nest_depth
-        if "LoopDecision" in decisions
-        else 0
-    )
+    if "LoopDecision" in decisions:
+        loop_d = decisions["LoopDecision"]
+        # mypy: narrow `Decision | None` -> the LoopDecision the
+        # earlier _build_loop_decision returned.
+        assert isinstance(loop_d, LoopDecision)
+        workspace.metadata["cv32e40p_hw_loop_count"] = loop_d.nest_depth
+    else:
+        workspace.metadata["cv32e40p_hw_loop_count"] = 0
 
     # Propagate the CLI-level ``enable_debug`` knob.  PrunePatch
     # reads this when invoking the debug/ctrl pragma processors;
     # see the "Flag derivation note" in PrunePatch.apply.  When
     # ``cfg`` doesn't carry the attribute we default to True
     # (the canonical "keep debug" stance).
-    workspace.metadata["cv32e40p_enable_debug"] = bool(
-        getattr(cfg, "enable_debug", True)
-    )
+    workspace.metadata["cv32e40p_enable_debug"] = bool(getattr(cfg, "enable_debug", True))
 
     # ── 7. Run patches in canonical order ────────────────────────
     for kind in _PATCH_ORDER:
@@ -287,14 +290,20 @@ def emit_via_portability(
             continue
         decision = decisions[kind]
         # Each render_*_decision is the canonical factory for the
-        # patch list for that decision kind.
+        # patch list for that decision kind.  We type-narrow the
+        # ``Decision`` payload to the concrete subclass before
+        # dispatch (mypy strict requires this).
         if kind == "PruneDecision":
+            assert isinstance(decision, PruneDecision)
             patches = target.render_prune_decision(decision, workspace)
         elif kind == "FusionDecision":
+            assert isinstance(decision, FusionDecision)
             patches = target.render_fusion_decision(decision, workspace)
         elif kind == "LoopDecision":
+            assert isinstance(decision, LoopDecision)
             patches = target.render_loop_decision(decision, workspace)
         elif kind == "WidthDecision":
+            assert isinstance(decision, WidthDecision)
             patches = target.render_width_decision(decision, workspace)
         else:  # pragma: no cover - guarded by _PATCH_ORDER
             continue
@@ -302,16 +311,17 @@ def emit_via_portability(
         for patch in patches:
             try:
                 patch.apply(workspace)
-            except Exception as exc:  # pragma: no cover
+            except Exception:
                 # Mirror legacy behaviour: log + continue.  Hard
                 # failures should still bubble; soft skips keep
                 # the runner alive when a template anchor is
                 # missing in some unusual benchmark configuration.
-                if verbose:
-                    print(
-                        f"  [portability] patch {patch!r} for "
-                        f"{kind} skipped: {exc}"
-                    )
+                logger.warning(
+                    "Soft-skip: patch %r for %s raised; continuing with the rest of the variant",
+                    patch,
+                    kind,
+                    exc_info=True,
+                )
 
     # ── 8. ctx side-effects the runner reads back ────────────────
     # The legacy code attaches `prune_report`, `verilator_extra_flags`,
@@ -322,6 +332,10 @@ def emit_via_portability(
         try:
             verilator_extra_flags = pc.verilator_flags()
         except Exception:
+            logger.debug(
+                "PruneConfig.verilator_flags() failed; defaulting to []",
+                exc_info=True,
+            )
             verilator_extra_flags = []
         ctx.verilator_extra_flags = verilator_extra_flags
 
@@ -337,7 +351,10 @@ def emit_via_portability(
             cs._hwlp_encoding = registry.get_hwloop_encoding()
             ctx._hwlp_encoding = cs._hwlp_encoding
         except Exception:
-            pass
+            logger.debug(
+                "Registry has no hwloop encoding to surface on cs/ctx",
+                exc_info=True,
+            )
 
 
 # ─── Predicate ────────────────────────────────────────────────────
@@ -351,6 +368,4 @@ def is_enabled(cfg: Any = None) -> bool:
     """
     if os.environ.get("ARVIS_USE_PORTABILITY") == "1":
         return True
-    if cfg is not None and getattr(cfg, "use_portability", False):
-        return True
-    return False
+    return cfg is not None and bool(getattr(cfg, "use_portability", False))

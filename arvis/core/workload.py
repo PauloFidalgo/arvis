@@ -15,18 +15,12 @@ in ``workloads/*.py`` (or YAML).  Phase 1 just defines the shape.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
 )
 
 if TYPE_CHECKING:
@@ -57,8 +51,8 @@ class BuildRecipe:
     """
 
     kind: str = "makefile"
-    working_dir: Optional[Path] = None
-    targets: Tuple[str, ...] = ("all",)
+    working_dir: Path | None = None
+    targets: tuple[str, ...] = ("all",)
     env: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -79,8 +73,8 @@ class ExpectedResult:
     """
 
     exit_status: int = 0
-    expected_cycles: Optional[int] = None
-    expected_output: Optional[str] = None
+    expected_cycles: int | None = None
+    expected_output: str | None = None
 
 
 # ─── Workload profile (analysis input) ─────────────────────────────
@@ -120,8 +114,8 @@ class WorkloadProfile:
     instr_histogram: Mapping[str, int] = field(default_factory=dict)
     dynamic_counts: Mapping[str, int] = field(default_factory=dict)
     cycle_profile: Mapping[str, int] = field(default_factory=dict)
-    loops: Tuple[Any, ...] = field(default_factory=tuple)
-    elf_paths: Tuple[Path, ...] = field(default_factory=tuple)
+    loops: tuple[Any, ...] = field(default_factory=tuple)
+    elf_paths: tuple[Path, ...] = field(default_factory=tuple)
     extra: Mapping[str, object] = field(default_factory=dict)
 
 
@@ -144,12 +138,12 @@ class Workload(ABC):
 
     @property
     @abstractmethod
-    def sources(self) -> List[Path]:
+    def sources(self) -> list[Path]:
         """All source files (C, ASM, headers) the workload needs."""
 
     @property
     @abstractmethod
-    def cflags(self) -> List[str]:
+    def cflags(self) -> list[str]:
         """Compiler flags specific to this workload.
 
         These are merged with the toolchain's default cflags; they
@@ -169,7 +163,7 @@ class Workload(ABC):
         """The reference behaviour for verification."""
 
     @abstractmethod
-    def profile(self, toolchain: "Toolchain") -> WorkloadProfile:
+    def profile(self, toolchain: Toolchain) -> WorkloadProfile:
         """Analyse the workload and return a :class:`WorkloadProfile`.
 
         Implementations typically (a) compile a baseline binary,
@@ -194,7 +188,7 @@ class WorkloadSuite:
     """
 
     name: str
-    workloads: List[Workload] = field(default_factory=list)
+    workloads: list[Workload] = field(default_factory=list)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Workload]:
         return iter(self.workloads)

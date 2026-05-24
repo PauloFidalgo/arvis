@@ -18,15 +18,25 @@ types.  Phase 2.2-2.4 add the other three.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from arvis.core.rtl_patch import RTLPatch, RTLWorkspace
 
 if TYPE_CHECKING:
-    from arvis.core.strategy import WidthDecision
+    from arvis.codegen.rtl.rtl_pruning import PruneConfig
+    from arvis.core.strategy import (
+        FusionDecision,
+        LoopDecision,
+        PruneDecision,
+        WidthDecision,
+    )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ─── WidthNarrowingPatch ──────────────────────────────────────────
@@ -57,7 +67,7 @@ class WidthNarrowingPatch(RTLPatch):
     parameters are already at the requested values.
     """
 
-    decision: "WidthDecision"
+    decision: WidthDecision
 
     @property
     def label(self) -> str:
@@ -86,13 +96,15 @@ class WidthNarrowingPatch(RTLPatch):
         if 0 < pc < 32:
             try:
                 from arvis.pipeline.pc_width import patch_rtl_dir as _patch_pc
+
                 _patch_pc(rtl_dir, pc)
             except Exception:
-                # Mirror the legacy RTLChangeSet.apply path which
-                # logs a warning and continues; here we surface a
-                # softer "skip" because raising would abort the
-                # pipeline.  Phase 3 may tighten this.
-                pass
+                logger.warning(
+                    "Soft-skip: apply_pc_width.patch_rtl_dir raised "
+                    "for pc_width=%d; leaving PC width unchanged",
+                    pc,
+                    exc_info=True,
+                )
 
         # ── HWLP address width: regex parameter rewrite ──
         if self.decision.hwlp_addr_width < 32:
@@ -167,7 +179,7 @@ class PrunePatch(RTLPatch):
     (174 SV files byte-identical between the new and legacy paths).
     """
 
-    decision: "PruneDecision"
+    decision: PruneDecision
 
     @property
     def label(self) -> str:
@@ -219,10 +231,10 @@ class PrunePatch(RTLPatch):
                     custom_instructions=None,
                 )
             except Exception:
-                # Decoder regeneration may fail when the templates
-                # don't have the expected structure.  Swallow and
-                # proceed with whatever the case-pruning produced.
-                pass
+                logger.warning(
+                    "Decoder regeneration failed; proceeding with whatever case-pruning produced",
+                    exc_info=True,
+                )
 
             # Step 3: Hwloop pragma processor (with the variant's
             # actual hw_loop_count, stashed in workspace metadata
@@ -230,6 +242,7 @@ class PrunePatch(RTLPatch):
             # RTLChangeSet.apply line 244.  Runs AFTER the decoder
             # regen so the regen-introduced markers get stripped at
             # the right count.
+            from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
             from arvis.targets.cv32e40p.passes import (
                 apply_ctrl_pragmas,
                 apply_ctrl_pragmas_on_dir,
@@ -241,17 +254,18 @@ class PrunePatch(RTLPatch):
                 apply_pulp_pragmas,
                 apply_pulp_pragmas_on_dir,
             )
-            from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
 
-            hw_loop_count = workspace.metadata.get(
-                "cv32e40p_hw_loop_count", 0
-            )
+            hw_loop_count = workspace.metadata.get("cv32e40p_hw_loop_count", 0)
             registry_meta = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
             hwlp_encoding = None
             if registry_meta is not None and hw_loop_count > 0:
                 try:
                     hwlp_encoding = registry_meta.get_hwloop_encoding()
                 except Exception:
+                    logger.debug(
+                        "Registry lacks an hwloop encoding; falling back to template defaults",
+                        exc_info=True,
+                    )
                     hwlp_encoding = None
 
             apply_hwloop_pragmas(
@@ -278,19 +292,13 @@ class PrunePatch(RTLPatch):
             # invocation in tests) we default to ``True`` -- the
             # canonical "keep debug" stance that matches the test
             # infrastructure's cfg-shim.
-            enable_debug = bool(
-                workspace.metadata.get("cv32e40p_enable_debug", True)
-            )
+            enable_debug = bool(workspace.metadata.get("cv32e40p_enable_debug", True))
             corev_pulp = int(getattr(config, "corev_pulp", 0) or 0)
-            enable_interrupts = bool(
-                getattr(config, "enable_interrupts", True)
-            )
+            enable_interrupts = bool(getattr(config, "enable_interrupts", True))
 
             apply_debug_pragmas(workspace, enable_debug=enable_debug)
             apply_pulp_pragmas(workspace, corev_pulp=corev_pulp)
-            apply_irq_pragmas(
-                workspace, enable_interrupts=enable_interrupts
-            )
+            apply_irq_pragmas(workspace, enable_interrupts=enable_interrupts)
             apply_ctrl_pragmas(
                 workspace,
                 enable_interrupts=enable_interrupts,
@@ -299,13 +307,9 @@ class PrunePatch(RTLPatch):
 
             # Also process the include directory for pkg-level
             # pragmas.
-            include_dir = (
-                Path(legacy_ws.output_root) / "rtl" / "include"
-            )
+            include_dir = Path(legacy_ws.output_root) / "rtl" / "include"
             if include_dir.exists():
-                apply_pulp_pragmas_on_dir(
-                    workspace, include_dir, corev_pulp=corev_pulp
-                )
+                apply_pulp_pragmas_on_dir(workspace, include_dir, corev_pulp=corev_pulp)
                 apply_ctrl_pragmas_on_dir(
                     workspace,
                     include_dir,
@@ -323,14 +327,16 @@ class PrunePatch(RTLPatch):
                 verbose=False,
             )
         except Exception:
-            # Mirror Phase 2.1's soft-skip policy: don't abort the
-            # pipeline on a render error.  In practice this should
-            # only happen when the RTL templates lack the expected
-            # pragma markers, which is a portability concern for
-            # non-cv32e40p forks.
-            pass
+            logger.warning(
+                "Soft-skip: PrunePatch render error; the variant's "
+                "RTL is left in whatever partial state was reached. "
+                "This usually means the template tree lacks expected "
+                "pragma markers (common when porting to a "
+                "non-cv32e40p fork).",
+                exc_info=True,
+            )
 
-    def _build_prune_config(self):
+    def _build_prune_config(self) -> PruneConfig:
         """Construct a :class:`PruneConfig` from the typed Decision.
 
         This is the inverse of :meth:`UsageDrivenPruner._translate`.
@@ -365,7 +371,6 @@ class PrunePatch(RTLPatch):
         return cfg
 
 
-
 # ─── FusionPatch ───────────────────────────────────────────────────
 
 
@@ -390,7 +395,7 @@ class FusionPatch(RTLPatch):
     responsible for ordering patches correctly.
     """
 
-    decision: "FusionDecision"
+    decision: FusionDecision
 
     @property
     def label(self) -> str:
@@ -416,9 +421,7 @@ class FusionPatch(RTLPatch):
 
         registry = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
         hw_loop_count = (
-            len(getattr(registry, "hwloop_instructions", []))
-            if registry is not None
-            else 0
+            len(getattr(registry, "hwloop_instructions", [])) if registry is not None else 0
         )
 
         try:
@@ -434,9 +437,7 @@ class FusionPatch(RTLPatch):
                 # because apply_fusion_patches already did it.
                 workspace.metadata["cv32e40p_fusion_patch_ran"] = True
         except Exception:
-            # Soft-skip on render error (Phase 2.1 policy).
-            pass
-
+            logger.warning("Soft-skip: FusionPatch render error", exc_info=True)
 
 
 # ─── LoopPatch ─────────────────────────────────────────────────────
@@ -469,17 +470,14 @@ class LoopPatch(RTLPatch):
     hex/elf -- it does not affect the emitted RTL.
     """
 
-    decision: "LoopDecision"
+    decision: LoopDecision
 
     @property
     def label(self) -> str:
         d = self.decision
         if d.nest_depth == 0:
             return "LoopPatch(noop)"
-        return (
-            f"LoopPatch(nest={d.nest_depth}, "
-            f"cnt={d.counter_width}b, addr={d.addr_width}b)"
-        )
+        return f"LoopPatch(nest={d.nest_depth}, cnt={d.counter_width}b, addr={d.addr_width}b)"
 
     def apply(self, workspace: RTLWorkspace) -> None:
         # Hwloop pragma processing was already done by
@@ -493,6 +491,7 @@ class LoopPatch(RTLPatch):
         # Read the encoding registry that allocate_workspace_metadata
         # populated.
         from arvis.targets.cv32e40p.encoding import WORKSPACE_REGISTRY_KEY
+
         registry = workspace.metadata.get(WORKSPACE_REGISTRY_KEY)
         encoding = None
         if registry is not None:
@@ -537,7 +536,7 @@ class LoopPatch(RTLPatch):
             self._inject_hwloop_decoder_cases(workspace, registry)
 
     @staticmethod
-    def _inject_hwloop_decoder_cases(workspace: RTLWorkspace, registry) -> None:
+    def _inject_hwloop_decoder_cases(workspace: RTLWorkspace, registry: Any) -> None:
         """Inject hwloop OPCODE_CUSTOM_* decoder cases via the
         canonical fusion pass with empty ``fused_operations``.
 
@@ -566,10 +565,12 @@ class LoopPatch(RTLPatch):
                 hw_loop_count=len(getattr(registry, "hwloop_instructions", [])),
             )
         except Exception:
-            # Some templates may lack the ARVIS_FUSED_BEGIN markers
-            # the fusion patcher needs; documented portability
-            # concern.
-            pass
+            logger.warning(
+                "Soft-skip: hwloop decoder injection failed; the "
+                "template tree probably lacks ARVIS_FUSED_BEGIN "
+                "markers (cv32e40p portability concern).",
+                exc_info=True,
+            )
 
     @staticmethod
     def _rewrite_loop_parameters(
@@ -590,6 +591,7 @@ class LoopPatch(RTLPatch):
         timestamps).
         """
         import re as _re
+
         for sv_file in workspace.output_root.rglob("*.sv"):
             text = sv_file.read_text()
             new_text = _re.sub(
@@ -613,7 +615,7 @@ class LoopPatch(RTLPatch):
                 sv_file.write_text(new_text)
 
     @staticmethod
-    def _swap_hwloop_regs_template(workspace: RTLWorkspace, encoding) -> None:
+    def _swap_hwloop_regs_template(workspace: RTLWorkspace, encoding: Any) -> None:
         """Copy the parameterised hwloop_regs template over the
         baseline file and patch funct3 values.
 
@@ -622,6 +624,7 @@ class LoopPatch(RTLPatch):
         template file (the swap is just skipped).
         """
         import shutil
+
         custom_hwlp = workspace.source_root / "rtl" / "template" / "cv32e40p_hwloop_regs.sv"
         target_hwlp = workspace.output_root / "rtl" / "cv32e40p_hwloop_regs.sv"
         if not custom_hwlp.exists():
@@ -631,13 +634,15 @@ class LoopPatch(RTLPatch):
         if encoding is None:
             return
         # Patch funct3 values in the ARVIS_HWLP_BEGIN/END pragma block.
-        # Same regex as the legacy code.
+        # Same regex as the legacy code.  The SystemVerilog
+        # template lines are intentionally long; we suppress
+        # E501 for legibility.
         text = target_hwlp.read_text()
         replacement = (
-            f"  assign hwlp_we_start     = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b} || hwlp_funct3_i == 3'b{encoding.start_funct3:03b});\n"
-            f"  assign hwlp_we_end       = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b} || hwlp_funct3_i == 3'b{encoding.end_funct3:03b});\n"
-            f"  assign hwlp_we_start_end = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b});\n"
-            f"  assign hwlp_we_cnt       = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.count_funct3:03b});\n"
+            f"  assign hwlp_we_start     = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b} || hwlp_funct3_i == 3'b{encoding.start_funct3:03b});\n"  # noqa: E501
+            f"  assign hwlp_we_end       = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b} || hwlp_funct3_i == 3'b{encoding.end_funct3:03b});\n"  # noqa: E501
+            f"  assign hwlp_we_start_end = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b});\n"  # noqa: E501
+            f"  assign hwlp_we_cnt       = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.count_funct3:03b});\n"  # noqa: E501
         )
         text = re.sub(
             r"// ARVIS_HWLP_BEGIN: hwlp_regs_we\n.*?// ARVIS_HWLP_END: hwlp_regs_we",
