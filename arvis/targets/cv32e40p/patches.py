@@ -187,16 +187,22 @@ class PrunePatch(RTLPatch):
         cfg_shim = self._make_cfg_shim(workspace)
 
         try:
-            # Step 1: Pruning parameter gating + decoder regen +
-            # case pruning.
+            # Step 1: Pruning parameter gating + opcode case
+            # pruning.  Mirrors legacy
+            # RTLChangeSet.apply line 187 (Step 2 in the legacy
+            # comments).
             pruner = RTLPruner(legacy_ws)
+            pruner.apply(config, verbose=False)
 
-            # Generate specialized decoder from the workload's
-            # actual used_instructions.  Mirrors legacy
-            # RTLChangeSet.apply line 223.  Note this regenerates
-            # decoder.sv from a template that re-introduces the
-            # ARVIS_HWLP markers; pragma processing in Step 3 below
-            # strips them back out at the right hw_loop count.
+            # Step 2: Generate specialized decoder.  Mirrors legacy
+            # line 222 (Step 3).  Note: this REGENERATES decoder.sv
+            # from a template, OVERWRITING the opcode-block pruning
+            # that pruner.apply did in Step 1.  The legacy code does
+            # this in the same order intentionally -- the regen
+            # produces a decoder for the workload's actual
+            # used_instructions; opcode-group removability is a
+            # weaker signal that's superseded by the per-instruction
+            # specialization.
             try:
                 pruner.generate_specialized_decoder(
                     used_instructions=set(self.decision.used_instructions),
@@ -204,14 +210,9 @@ class PrunePatch(RTLPatch):
                 )
             except Exception:
                 # Decoder regeneration may fail when the templates
-                # don't have the expected structure (e.g. an early
-                # cv32e40p baseline missing the
-                # generate_specialized_decoder anchors).  Swallow
-                # and proceed with the unspecialised decoder.
+                # don't have the expected structure.  Swallow and
+                # proceed with whatever the case-pruning produced.
                 pass
-
-            # Apply parameter gates + case pruning.
-            pruner.apply(config, verbose=False)
 
             # Step 2: Hwloop pragma processor (with the variant's
             # actual hw_loop_count, stashed in workspace metadata
@@ -240,13 +241,14 @@ class PrunePatch(RTLPatch):
                 def __getattr__(self, name): return None
             cs._apply_hwloop_pragmas(legacy_ws, _HwlpCtxShim(), verbose=False)
 
-            # Step 3: Pragma processors (pulp/irq/ctrl/debug) -- the
+            # Step 3: Pragma processors (debug/pulp/irq/ctrl) -- the
             # legacy code runs these whenever has_real_pruning is
-            # True.
+            # True.  Order is canonical: debug first, then pulp,
+            # irq, ctrl (matches RTLChangeSet.apply lines 305-309).
+            cs._apply_debug_pragmas(legacy_ws, cfg_shim, verbose=False)
             cs._apply_pulp_pragmas(legacy_ws, cfg_shim, verbose=False)
             cs._apply_irq_pragmas(legacy_ws, verbose=False)
             cs._apply_ctrl_pragmas(legacy_ws, cfg_shim, verbose=False)
-            cs._apply_debug_pragmas(legacy_ws, cfg_shim, verbose=False)
 
             # Also process the include directory for pkg-level
             # pragmas.
@@ -410,6 +412,10 @@ class FusionPatch(RTLPatch):
 
         try:
             cs._apply_fusion_patches(workspace, _CtxShim())
+            # Signal to LoopPatch that fusion patches have run; it
+            # will skip its own hwloop decoder injection because
+            # _apply_fusion_patches already did it.
+            workspace.metadata["cv32e40p_fusion_patch_ran"] = True
         except Exception:
             # Soft-skip on render error (Phase 2.1 policy).
             pass
@@ -462,8 +468,8 @@ class LoopPatch(RTLPatch):
         # Hwloop pragma processing was already done by
         # CV32E40P.allocate_workspace_metadata BEFORE any patches
         # ran (with the variant's actual nest_depth).  This patch
-        # only does the template swap + parameter rewrites, both
-        # gated on nest_depth > 0.
+        # only does the template swap + parameter rewrites + hwloop
+        # decoder-case injection, all gated on nest_depth > 0.
         if self.decision.nest_depth == 0:
             return
 
@@ -494,6 +500,58 @@ class LoopPatch(RTLPatch):
             cnt_width=self.decision.counter_width,
             addr_width=self.decision.addr_width,
         )
+
+        # Inject hwloop decoder cases into OPCODE_CUSTOM_0 (and
+        # potentially CUSTOM_1 etc. for nest_depth > 2).  Mirrors
+        # legacy ``RTLChangeSet.apply`` line 322-326:
+        #
+        #     has_hwlp = self.hw_loop_count > 0 and hasattr(self, '_custom_registry')
+        #     if self.fused_operations or has_hwlp:
+        #         self._apply_fusion_patches(ws, ctx)
+        #
+        # That call site bundles fusion AND hwloop decoder
+        # emission.  When the variant has FusionDecision (and
+        # FusionPatch ran before this), the fusion patcher
+        # already injected hwloop entries -- so we only need to
+        # do it here if FusionPatch wasn't going to run.  We
+        # detect that by checking workspace.metadata for a flag
+        # FusionPatch sets.
+        if not workspace.metadata.get("cv32e40p_fusion_patch_ran"):
+            self._inject_hwloop_decoder_cases(workspace, registry)
+
+    @staticmethod
+    def _inject_hwloop_decoder_cases(workspace: RTLWorkspace, registry) -> None:
+        """Run the legacy fusion-patch flow with EMPTY fused_ops
+        + the registry, to inject hwloop OPCODE_CUSTOM_* decoder
+        cases.
+
+        Mirrors the legacy RTLChangeSet.apply branch where
+        ``has_hwlp`` is True but ``fused_operations`` is empty.
+        """
+        if registry is None:
+            return
+        from arvis.pipeline.rtl_changeset import RTLChangeSet
+
+        cs = RTLChangeSet()
+        cs.fused_operations = []  # explicit: no fused ops
+        cs._custom_registry = registry
+        try:
+            cs._hwlp_encoding = registry.get_hwloop_encoding()
+        except Exception:
+            cs._hwlp_encoding = None
+        cs.hw_loop_count = len(getattr(registry, "hwloop_instructions", []))
+
+        class _CtxShim:
+            def __setattr__(self, name, value): pass
+            def __getattr__(self, name): return None
+
+        try:
+            cs._apply_fusion_patches(workspace, _CtxShim())
+        except Exception:
+            # Some templates may lack the ARVIS_FUSED_BEGIN markers
+            # the fusion patcher needs; documented portability
+            # concern.
+            pass
 
     @staticmethod
     def _rewrite_loop_parameters(
