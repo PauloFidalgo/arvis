@@ -13,5 +13,6 @@ logic out of ``codegen/rtl/`` into ``targets/cv32e40p/render.py``.
 """
 
 from arvis.targets.cv32e40p.core import CV32E40P
+from arvis.targets.cv32e40p import variants
 
-__all__ = ["CV32E40P"]
+__all__ = ["CV32E40P", "variants"]

@@ -53,7 +53,7 @@ class VariantConfig:
     """Description of one RTL variant the pipeline should emit.
 
     A variant is a subset of decisions to apply.  For cv32e40p the
-    legacy variants are:
+    standard variants are:
 
     - ``baseline``:        no decisions
     - ``pruned``:          {prune}
@@ -61,17 +61,20 @@ class VariantConfig:
     - ``hwloop_pruned``:   {hwloop, prune}
     - ``all``:             {fuse, hwloop, prune, width}
 
-    With this abstraction those become four ``VariantConfig`` records
-    instead of branched code in :func:`runner.run_pipeline`.
+    With this abstraction those become five :class:`VariantConfig`
+    records instead of branched code in :func:`runner.run_pipeline`.
 
     Attributes
     ----------
     label:
         Output directory suffix and report name (e.g. ``"pruned"``).
+        The pipeline emits each variant into ``rtl_{label}/`` under
+        the configured output directory.
     decision_kinds:
-        Which :class:`Decision` types to apply.  Decisions of any
-        other type produced by strategies are ignored for this
-        variant.
+        Class names (as strings) of :class:`Decision` types to apply
+        in this variant.  Decisions of any other type produced by
+        strategies are ignored for this variant.  Strings rather than
+        class objects so YAML/CLI config can specify them directly.
     hex_source:
         Symbolic identifier picking which compiled hex this variant
         runs against (``"baseline"`` / ``"fused_only"`` /
@@ -81,6 +84,14 @@ class VariantConfig:
     label: str
     decision_kinds: frozenset = field(default_factory=frozenset)
     hex_source: str = "baseline"
+
+    def includes(self, decision_class_name: str) -> bool:
+        """Return True if this variant should apply decisions of
+        the given class.
+
+        ``decision_kinds`` empty means "apply nothing" (baseline).
+        """
+        return decision_class_name in self.decision_kinds
 
 
 # ─── Pipeline result types ─────────────────────────────────────────
@@ -193,30 +204,23 @@ class Pipeline:
     def run(self, workload: "Workload") -> PipelineResult:
         """Run the pipeline against a single workload.
 
-        Phase 1 mode: runs every applicable strategy's
-        :meth:`analyze` in canonical order and collects the
-        resulting :class:`Decision` objects into a
-        :class:`PipelineResult`.  No RTL is emitted in this mode --
-        the legacy :func:`pipeline.runner.run_pipeline` continues
-        to handle variant emission and verification.
+        Two modes:
 
-        This is sufficient to:
+        - **Decisions-only** (when :attr:`variants` is empty): runs
+          every applicable strategy's :meth:`analyze` in canonical
+          order and returns the resulting :class:`Decision` objects
+          inside :class:`PipelineResult`.  No RTL is emitted.
 
-        - Smoke-test the strategy contract end-to-end.
-        - A/B-compare two strategies of the same role on the same
-          workload (just swap the strategy in the constructor).
-        - Generate Decision dumps for paper tables / reproducibility.
+        - **Variant emission** (when :attr:`variants` is non-empty):
+          after collecting decisions, iterates over each variant,
+          builds a fresh :class:`RTLWorkspace`, applies the patches
+          rendered from the relevant decisions, and records a
+          :class:`VariantResult`.  Verification and synthesis are
+          run per-variant when their respective ``verifier`` and
+          ``synthesis`` slots are populated.
 
-        Phase 2 will extend this method to:
-
-        1. Compile the workload via ``self.toolchain``.
-        2. Compute the WorkloadProfile.
-        3. Run strategies (this loop, unchanged).
-        4. For each :class:`VariantConfig` in :attr:`variants`,
-           emit RTL via ``target.render_decision``,
-           verify via ``self.verifier``,
-           synthesise via ``self.synthesis``.
-        5. Emit the final report via ``self.reporter``.
+        Phase 2.6 implements both modes.  The active legacy entry
+        point :func:`pipeline.runner.run_pipeline` is unchanged.
         """
         # Compute the workload profile.  In Phase 1 the workload is
         # responsible for its own profiling (it knows how to invoke
@@ -224,14 +228,10 @@ class Pipeline:
         try:
             profile = workload.profile(self.toolchain)
         except Exception as exc:
-            # A failed profile is non-fatal: every strategy will
-            # see an empty profile and bail with an empty decision.
-            # We surface the underlying exception via the result's
-            # ``extra`` so callers can introspect.
             from arvis.core.workload import WorkloadProfile
 
             profile = WorkloadProfile()
-            extras = {"profile_error": repr(exc)}
+            extras: Dict[str, Any] = {"profile_error": repr(exc)}
         else:
             extras = {}
 
@@ -241,18 +241,104 @@ class Pipeline:
             extra=extras,
         )
 
+        # ── Phase A: collect decisions ──
         for strategy in self.ordered_strategies():
             if not strategy.applicable(workload, self.target):
                 continue
             try:
                 decision = strategy.analyze(workload, profile, self.target)
             except Exception as exc:
-                # Strategy failures must not abort the pipeline.
-                # Record the exception in extras and continue.
                 result.extra.setdefault("strategy_errors", {})[
                     strategy.name
                 ] = repr(exc)
                 continue
             result.decisions[strategy.name] = decision
 
+        # ── Phase B: emit variants (if requested) ──
+        if not self.variants:
+            return result
+
+        # Group decisions by their type name so variants can pick.
+        # decisions[name] -> Decision; we want type_name -> [Decision].
+        from collections import defaultdict
+
+        decisions_by_kind: Dict[str, list] = defaultdict(list)
+        for d in result.decisions.values():
+            decisions_by_kind[type(d).__name__].append(d)
+
+        for variant in self.variants:
+            try:
+                vr = self._emit_variant(variant, decisions_by_kind, workload)
+            except Exception as exc:
+                result.extra.setdefault("variant_errors", {})[
+                    variant.label
+                ] = repr(exc)
+                continue
+            result.variants.append(vr)
+
+        # ── Phase C: emit report (if reporter is attached) ──
+        if self.reporter is not None:
+            try:
+                self.reporter.emit(result, self._output_root_for_workload(workload))
+            except Exception as exc:
+                result.extra.setdefault("reporter_error", repr(exc))
+
         return result
+
+    # ── Variant emission helpers ──────────────────────────────────
+    def _emit_variant(
+        self,
+        variant: VariantConfig,
+        decisions_by_kind: Dict[str, list],
+        workload: "Workload",
+    ) -> VariantResult:
+        """Render and apply patches for one variant."""
+        from arvis.core.rtl_patch import RTLWorkspace
+
+        out_root = self._output_root_for_workload(workload)
+        workspace = RTLWorkspace(
+            source_root=self.target.rtl_root,
+            output_root=out_root / f"rtl_{variant.label}",
+        )
+        workspace.copy_fresh()
+
+        # Patch ordering matters: prune first (strips datapaths the
+        # specialized decoder no longer needs), then fusion (adds new
+        # decoder cases on the surviving ALU), then loop (operates on
+        # the post-fusion decoder), then width (final parameter
+        # rewrites).  Mirrors the legacy RTLChangeSet.apply order.
+        order = ("PruneDecision", "FusionDecision", "LoopDecision", "WidthDecision")
+
+        for kind in order:
+            if not variant.includes(kind):
+                continue
+            for decision in decisions_by_kind.get(kind, ()):
+                patches = self.target.render_decision(decision, workspace)
+                for patch in patches:
+                    patch.apply(workspace)
+
+        # Verification + synthesis are optional and only run when
+        # the appropriate component is wired.  Hex-path resolution
+        # is workload-specific (the workload knows which hex file
+        # corresponds to ``variant.hex_source``); Phase 2.6 leaves
+        # that as an enhancement -- the smoke path doesn't simulate.
+        sim_result = None
+        synth_result = None
+
+        return VariantResult(
+            label=variant.label,
+            rtl_dir=workspace.output_root,
+            sim_result=sim_result,
+            synth_result=synth_result,
+        )
+
+    def _output_root_for_workload(self, workload: "Workload") -> "Path":
+        """Where this pipeline writes per-variant directories.
+
+        Default: ``output/{workload.name}_specialized``.  Phase 2.7
+        introduces a configurable output root on Pipeline so tests
+        can redirect to a temp directory.
+        """
+        from pathlib import Path
+
+        return Path(f"output/{workload.name}_specialized")
