@@ -296,3 +296,151 @@ class FusionPatch(RTLPatch):
         except Exception:
             # Soft-skip on render error (Phase 2.1 policy).
             pass
+
+
+
+# ─── LoopPatch ─────────────────────────────────────────────────────
+
+
+@dataclass
+class LoopPatch(RTLPatch):
+    """Apply a :class:`LoopDecision` to a cv32e40p RTL workspace.
+
+    Phase 2 implementation: delegates to the legacy hwloop RTL
+    code path inside :class:`pipeline.rtl_changeset.RTLChangeSet`.
+    The patch:
+
+    1. Calls ``_apply_hwloop_pragmas`` to resolve the ARVIS_HWLP
+       pragmas across the tree based on ``hw_loop_count``.
+    2. When ``nest_depth > 0``, replaces ``cv32e40p_hwloop_regs.sv``
+       with the parameterised template from
+       ``targets/cv32e40p/rtl/template/`` and patches the funct3
+       values from the encoding payload.
+
+    Note that HWLP_ADDR_WIDTH and CNT_WIDTH parameter rewrites are
+    NOT done here — those live on WidthDecision and are applied by
+    :class:`WidthNarrowingPatch` (Phase 2.1).  The orchestrator is
+    expected to apply LoopPatch first, then WidthNarrowingPatch.
+
+    The decision's ``patched_loops`` field is informational only at
+    this stage; the actual assembly patching (lp.start/end/count
+    insertion) happens at the toolchain level inside
+    :class:`pipeline.hwloop.run` and is reflected in the compiled
+    hex/elf -- it does not affect the emitted RTL.
+    """
+
+    decision: "LoopDecision"
+
+    @property
+    def label(self) -> str:
+        d = self.decision
+        if d.nest_depth == 0:
+            return "LoopPatch(noop)"
+        return (
+            f"LoopPatch(nest={d.nest_depth}, "
+            f"cnt={d.counter_width}b, addr={d.addr_width}b)"
+        )
+
+    def apply(self, workspace: RTLWorkspace) -> None:
+        if self.decision.nest_depth == 0 and not self.decision.patched_loops:
+            # No hwloop activity -- pragma processor still runs to
+            # strip any ARVIS_HWLP markers from the templates,
+            # mirroring legacy behaviour where _apply_hwloop_pragmas
+            # is called unconditionally.
+            self._apply_pragmas_only(workspace, hw_loop_count=0)
+            return
+
+        from arvis.pipeline.rtl_changeset import RTLChangeSet
+
+        cs = RTLChangeSet()
+        cs.hw_loop_count = self.decision.nest_depth
+
+        # Carry encoding info from target_payload if the loop
+        # strategy populated it.
+        if isinstance(getattr(self.decision, "target_payload", None), dict):
+            payload = self.decision.target_payload  # type: ignore[attr-defined]
+            if "hwlp_encoding" in payload:
+                cs._hwlp_encoding = payload["hwlp_encoding"]
+            if "custom_registry" in payload:
+                cs._custom_registry = payload["custom_registry"]
+
+        # Build a minimal ctx shim.  _apply_hwloop_pragmas only
+        # writes status flags; reads via getattr return None.
+        class _CtxShim:
+            def __setattr__(self, name, value):
+                pass
+
+            def __getattr__(self, name):
+                return None
+
+        try:
+            cs._apply_hwloop_pragmas(workspace, _CtxShim(), verbose=False)
+        except Exception:
+            pass
+
+        # When hw_loop_count > 0, swap in the parameterised
+        # hwloop_regs template.  This mirrors lines 245-... of the
+        # legacy RTLChangeSet.apply.
+        if cs.hw_loop_count > 0:
+            self._swap_hwloop_regs_template(
+                workspace, getattr(cs, "_hwlp_encoding", None)
+            )
+
+    @staticmethod
+    def _apply_pragmas_only(workspace: RTLWorkspace, hw_loop_count: int) -> None:
+        """Run only the pragma processor, no template swap.
+
+        Used when nest_depth=0 to mirror legacy behaviour where the
+        ARVIS_HWLP pragmas are stripped out (hwloop disabled).
+        """
+        from arvis.pipeline.rtl_changeset import RTLChangeSet
+
+        cs = RTLChangeSet()
+        cs.hw_loop_count = hw_loop_count
+
+        class _CtxShim:
+            def __setattr__(self, name, value):
+                pass
+
+            def __getattr__(self, name):
+                return None
+
+        try:
+            cs._apply_hwloop_pragmas(workspace, _CtxShim(), verbose=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _swap_hwloop_regs_template(workspace: RTLWorkspace, encoding) -> None:
+        """Copy the parameterised hwloop_regs template over the
+        baseline file and patch funct3 values.
+
+        Mirrors legacy ``RTLChangeSet.apply`` lines 245-275.  Safe
+        to call on a workspace whose source_root doesn't ship a
+        template file (the swap is just skipped).
+        """
+        import shutil
+        custom_hwlp = workspace.source_root / "rtl" / "template" / "cv32e40p_hwloop_regs.sv"
+        target_hwlp = workspace.output_root / "rtl" / "cv32e40p_hwloop_regs.sv"
+        if not custom_hwlp.exists():
+            return
+        shutil.copy2(str(custom_hwlp), str(target_hwlp))
+
+        if encoding is None:
+            return
+        # Patch funct3 values in the ARVIS_HWLP_BEGIN/END pragma block.
+        # Same regex as the legacy code.
+        text = target_hwlp.read_text()
+        replacement = (
+            f"  assign hwlp_we_start     = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b} || hwlp_funct3_i == 3'b{encoding.start_funct3:03b});\n"
+            f"  assign hwlp_we_end       = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b} || hwlp_funct3_i == 3'b{encoding.end_funct3:03b});\n"
+            f"  assign hwlp_we_start_end = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.bounds_funct3:03b});\n"
+            f"  assign hwlp_we_cnt       = hwlp_we_i && (hwlp_funct3_i == 3'b{encoding.count_funct3:03b});\n"
+        )
+        text = re.sub(
+            r"// ARVIS_HWLP_BEGIN: hwlp_regs_we\n.*?// ARVIS_HWLP_END: hwlp_regs_we",
+            f"// ARVIS_HWLP_BEGIN: hwlp_regs_we\n{replacement}  // ARVIS_HWLP_END: hwlp_regs_we",
+            text,
+            flags=re.DOTALL,
+        )
+        target_hwlp.write_text(text)

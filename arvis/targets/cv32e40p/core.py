@@ -280,3 +280,15 @@ class CV32E40P(TargetCore):
         from arvis.targets.cv32e40p.patches import FusionPatch
 
         return [FusionPatch(decision=decision)]
+
+    def render_loop_decision(self, decision, workspace):
+        """Render a :class:`LoopDecision` to a list of patches.
+
+        Returns a single :class:`LoopPatch`.  Handles both the
+        ``nest_depth == 0`` case (pragma processor strips ARVIS_HWLP
+        markers) and the ``nest_depth > 0`` case (template swap +
+        funct3 patching).
+        """
+        from arvis.targets.cv32e40p.patches import LoopPatch
+
+        return [LoopPatch(decision=decision)]

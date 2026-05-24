@@ -191,12 +191,17 @@ class LoopDecision(Decision):
     patched_loops:
         Opaque records describing which loops were patched.  Used
         by the assembler-level patcher and by reports.
+    target_payload:
+        Phase 2 migration bridge -- mirrors :attr:`PruneDecision.target_payload`.
+        Populated by :class:`CV32E40PHWLoop` with the legacy
+        encoding / registry data needed by the cv32e40p RTL emitter.
     """
 
     nest_depth: int = 0
     counter_width: int = 32
     addr_width: int = 32
     patched_loops: Tuple[Any, ...] = field(default_factory=tuple)
+    target_payload: Optional[Any] = None
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
         return []
