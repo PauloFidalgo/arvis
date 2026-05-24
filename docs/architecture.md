@@ -390,6 +390,8 @@ The portability layer was introduced incrementally:
 | **3** | committed | Doc, test suite, typed-field migration (target_payload removed), partial codegen factoring. |
 | **2.8** | `cc33db3` | `--use-portability` flag wires `RTLChangeSet.apply` to the portable path; gateway smoke shows byte-equivalence on all 4 cs.apply variants. |
 | **3.2 + 3.3** | `7456fad` | All 12 ``RTLChangeSet._apply_*`` private methods promoted to pure free functions in ``targets/cv32e40p/passes.py`` -- the target package is now self-contained. |
+| **4.1 - 4.5** | `5f8eb8b..dd126cb` | Industry-standard hardening: pre-commit hooks (ruff/ruff-format/mypy/codespell), structured logging via ``core/logging_config``, Pydantic v2 ``BaseModel`` for the Decision hierarchy, ``mypy --strict`` clean across 32 source files, **>=90% test coverage** enforced in CI. |
+| **5.1 - 5.7** | next | Generalised hyperparameter-sweep framework (``core/sweep.py``) with 4 search strategies (Grid/Random/Bayesian/Halving) over multi-parameter spaces.  Existing FIFO + HW_LOOP sweeps become 30-line subclasses.  See ``docs/sweep.md``. |
 
 ### Phase 2.8: the portability gateway
 
@@ -530,7 +532,63 @@ forks.  A non-cv32e40p target would need to reimplement these
 primitives, then write its own `passes.py` that wraps them.
 
 
-## 12. Pointers
+## 12. Hyperparameter sweep framework
+
+Phase 5 generalises design-space exploration into a single
+:class:`SweepStrategy` framework.  See ``docs/sweep.md`` for the
+tutorial; the architecture summary:
+
+```
+core/sweep.py
+   ├─ SweepCandidate            one point in the design space
+   ├─ SearchSpace               parameter set + candidate values
+   ├─ SearchStrategy (Protocol) GridSearch | RandomSearch
+   │                            | BayesianSearch | SuccessiveHalving
+   ├─ SweepResult (Pydantic)    one evaluated candidate (JSON-able)
+   ├─ SweepDecision (Pydantic)  winner + all results
+   └─ SweepStrategy (abstract)  ties evaluator + cost + search
+
+strategies/sweep/
+   ├─ PrefetchFIFOSweep   single-parameter, FIFO_DEPTH
+   ├─ HWLoopDepthSweep    single-parameter, HW_LOOP
+   └─ MultiParamSweep     multi-parameter, arbitrary
+
+targets/cv32e40p/sweep_evaluators.py
+   ├─ PrefetchFIFOEvaluator   build RTL + Verilator + Yosys
+   └─ HWLoopDepthEvaluator    table lookup over pre-computed metrics
+```
+
+The framework is target-agnostic; concrete evaluators live in
+target packages and translate candidates into per-target work.
+Each evaluator:
+
+1. Receives a ``SweepCandidate`` (a parameter-override map).
+2. Builds the per-candidate RTL + simulates + synthesises.
+3. Returns a ``dict[str, float]`` containing at least
+   ``passed: bool``.
+
+The framework wraps the metrics into a ``SweepResult``, feeds the
+cost back to the (adaptive) search strategy via ``tell()``, and
+selects the lowest-cost passing candidate as the winner.
+
+Why Pydantic for ``SweepResult`` / ``SweepDecision``?
+
+* JSON round-trip is free (cache sweep results across runs).
+* Cross-process replay: a worker can dump a result; the main
+  process can reload it without re-running Verilator.
+* Type-safe access at construction time (validators reject
+  malformed metrics).
+
+Replacing today's three ad-hoc sweeps (``pipeline/prefetch_sweep.
+py``, ``pipeline/runner.py:_sweep_hwloop_candidates``,
+``analyze_counter_width``) with the unified framework is the
+explicit Phase 5 goal.  ``pipeline/prefetch_sweep.py`` is now a
+thin shim around :class:`PrefetchFIFOSweep`; the HW_LOOP sweep
+will follow once the dual-compile machinery is factored out of
+``runner.py``.
+
+
+## 13. Pointers
 
 - **Add a new pruning strategy**: see `strategies/pruning/usage_driven.py`,
   subclass `PruningStrategy`, return `PruneDecision`. Compose into a
