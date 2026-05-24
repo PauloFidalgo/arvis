@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from arvis.pipeline.context import PipelineContext
 
 
-def run_pipeline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
+def run_pipeline(cfg: ToolConfig, ctx: PipelineContext) -> None:
     """Run the ARVIS specialization pipeline according to cfg.enabled_phases."""
     from arvis.pipeline.rtl_changeset import RTLChangeSet
 
@@ -52,7 +52,9 @@ def run_pipeline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
     prune_config_orig, all_used_orig = None, set()
     prune_config_hwonly, all_used_hwonly = None, set()
     if "pruning" in cfg.enabled_phases:
-        prune_config_orig, all_used_orig, prune_config_hwonly, all_used_hwonly = _run_pruning(cfg, ctx, changeset)
+        prune_config_orig, all_used_orig, prune_config_hwonly, all_used_hwonly = _run_pruning(
+            cfg, ctx, changeset
+        )
 
     # ── PC pipeline narrowing analysis ──
     # Compute optimal PC_WIDTH from the widest binary the pipeline will
@@ -79,14 +81,14 @@ def run_pipeline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
 
     # ── HTML Report ──
     from arvis.cli import print_success
-    from arvis.report.html_report import generate_html_report
+    from report.html_report import generate_html_report
 
     report_path = generate_html_report(cfg, ctx)
     ctx.report_path = report_path
     print_success(f"HTML report: {report_path}")
 
 
-def _build_docker_baseline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
+def _build_docker_baseline(cfg: ToolConfig, ctx: PipelineContext) -> None:
     """Build baseline ELFs/hex with Docker GCC (no fused, no hwloop).
 
     Produces {prog}_baseline.elf, .hex, .s — never overwrites fusion outputs.
@@ -117,7 +119,9 @@ def _build_docker_baseline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
         ret = subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=10)
         if ret.returncode != 0:
             image = "custom-riscv-gcc-merged"
-            ret = subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=10)
+            ret = subprocess.run(
+                ["docker", "image", "inspect", image], capture_output=True, timeout=10
+            )
             if ret.returncode != 0:
                 print_warning("No Docker GCC image available — using system GCC baseline")
                 return
@@ -170,7 +174,9 @@ def _build_docker_baseline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
             _sh2.copy2(str(fused_s_backup), str(fused_s))
             fused_s_backup.unlink()
         # Rebuild with system GCC so the elf exists for profiling
-        subprocess.run(["make", "-C", str(bm_dir), "clean", "all"], capture_output=True, timeout=120)
+        subprocess.run(
+            ["make", "-C", str(bm_dir), "clean", "all"], capture_output=True, timeout=120
+        )
         return
 
     # Rename make outputs to baseline-specific names
@@ -208,7 +214,7 @@ def _build_docker_baseline(cfg: "ToolConfig", ctx: "PipelineContext") -> None:
     print_success("Docker baseline built → *_baseline.{elf,hex,s}")
 
 
-def _run_analysis(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> None:
+def _run_analysis(cfg: ToolConfig, ctx: PipelineContext, changeset) -> None:
     from arvis.pipeline import profiling, selection
 
     # Build baseline with Docker GCC (same compiler as fused/hwloop)
@@ -236,7 +242,7 @@ def _run_analysis(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> None:
                 changeset.prefetch_fifo_depth = best_depth
 
 
-def _run_fusion(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> None:
+def _run_fusion(cfg: ToolConfig, ctx: PipelineContext, changeset) -> None:
     from arvis.pipeline import fusion_rtl, gcc_compile
 
     _tmp_rtl = tempfile.mkdtemp(prefix="fusion_tmp_")
@@ -254,21 +260,21 @@ def _run_fusion(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> None:
             ctx._rtl_changeset_fused_ops = fused_ops  # type: ignore[attr-defined]
 
 
-def _compute_pc_width(ctx: "PipelineContext", fused_only_elf=None) -> int:
+def _compute_pc_width(ctx: PipelineContext, fused_only_elf=None) -> int:
     """Compute the optimal PC_WIDTH for whichever benchmark ELFs exist.
 
-    Mirrors :func:`arvis.pipeline.hwloop_sweep.analyze_addr_width` but for
-    the main PC pipeline rather than the hwloop registers.  We take the
-    max over every variant the pipeline will run (baseline, fused-only,
+    Mirrors :func:`pipeline.hwloop_sweep.analyze_addr_width` but for the
+    main PC pipeline rather than the hwloop registers.  We take the max
+    over every variant the pipeline will run (baseline, fused-only,
     hwloop-only, fused+hwloop) so the same RTL accommodates all of them.
 
     Returns 0 when no ELF is available, which signals "don't narrow"
     to :class:`RTLChangeSet`.
     """
     try:
-        from arvis.pipeline.pc_width import analyze_pc_width
+        from apply_pc_width import analyze_pc_width
     except ImportError:
-        return 0
+        return 0  # apply_pc_width.py not on PYTHONPATH; skip narrowing
 
     candidates = [
         ctx.fused_elf_path,
@@ -294,7 +300,7 @@ def _compute_pc_width(ctx: "PipelineContext", fused_only_elf=None) -> int:
     return width
 
 
-def _run_pruning(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> tuple:
+def _run_pruning(cfg: ToolConfig, ctx: PipelineContext, changeset) -> tuple:
     from arvis.cli import print_info
     from arvis.pipeline.pruning import compute_prune_config
 
@@ -354,8 +360,8 @@ def _run_pruning(cfg: "ToolConfig", ctx: "PipelineContext", changeset) -> tuple:
 
 
 def _run_verification(
-    cfg: "ToolConfig",
-    ctx: "PipelineContext",
+    cfg: ToolConfig,
+    ctx: PipelineContext,
     changeset,
     prune_config_orig,
     all_used_orig: set,
@@ -399,7 +405,9 @@ def _run_verification(
     if prune_config_orig is not None:
         changeset_prune.add_prune_config(copy.deepcopy(prune_config_orig), set(all_used_orig))
     else:
-        changeset_prune.add_prune_config(copy.deepcopy(changeset.prune_config), set(changeset.used_instructions))
+        changeset_prune.add_prune_config(
+            copy.deepcopy(changeset.prune_config), set(changeset.used_instructions)
+        )
     changeset_prune.pc_width = changeset.pc_width
     changeset_prune._apply_label = "pruned"
     changeset_prune.apply(cfg, ctx, verbose=False)
@@ -414,7 +422,9 @@ def _run_verification(
         cs3.prefetch_fifo_depth = changeset.prefetch_fifo_depth
         cs3.pc_width = changeset.pc_width
         cs3.add_fused_operations(changeset.fused_operations)
-        cs3.add_prune_config(copy.deepcopy(changeset.prune_config), set(changeset.used_instructions))
+        cs3.add_prune_config(
+            copy.deepcopy(changeset.prune_config), set(changeset.used_instructions)
+        )
         cs3._apply_label = "fused_pruned"
         cs3.apply(cfg, ctx)
         step3_hex = fused_only_hex or ctx.fused_hex_path
@@ -425,7 +435,9 @@ def _run_verification(
     # ── HW_LOOP sweep: pick best ADP and best cycles ──
     sweep_winners = None
     if has_hwloop_only or has_hwloop:
-        sweep_winners = _sweep_hwloop_candidates(cfg, ctx, changeset, prune_config_orig, all_used_orig)
+        sweep_winners = _sweep_hwloop_candidates(
+            cfg, ctx, changeset, prune_config_orig, all_used_orig
+        )
 
     def _set_candidate(hw_val, specific_cand=None):
         """Point changeset + ctx at a specific HW_LOOP candidate."""
@@ -461,7 +473,9 @@ def _run_verification(
         elif prune_config_orig is not None:
             cs4.add_prune_config(copy.deepcopy(prune_config_orig), set(all_used_orig))
         else:
-            cs4.add_prune_config(copy.deepcopy(changeset.prune_config), set(changeset.used_instructions))
+            cs4.add_prune_config(
+                copy.deepcopy(changeset.prune_config), set(changeset.used_instructions)
+            )
         cs4._apply_label = tag
         cs4.apply(cfg, ctx)
         rtl_dirs[tag] = os.path.join(ctx.rtl_output_dir, "rtl")
@@ -502,6 +516,7 @@ def _run_verification(
         else:
             step4_hex = plain_hexes[0][0] if plain_hexes else ctx.hwloop_only_hex_path
             ctx.hex_hwloop_pruned = step4_hex
+            sim4 = None
         # Retry with pre-validation if no variant passed — try each candidate's plain_src
         if not best_sim:
             from arvis.cli import print_info
@@ -520,9 +535,13 @@ def _run_verification(
                 _vr = VerilatorRunner(_make_sim_cfg(cfg))
                 _TB = {"COREV_PULP", "FPU", "NUM_MHPMCOUNTERS", "HW_LOOP", "COREV_CLUSTER", "ZFINX"}
                 _fl = [
-                    f for f in getattr(ctx, "verilator_extra_flags", []) if any(f.startswith(f"-G{p}=") for p in _TB)
+                    f
+                    for f in getattr(ctx, "verilator_extra_flags", [])
+                    if any(f.startswith(f"-G{p}=") for p in _TB)
                 ]
-                _ok, _sim_bin, _ = _vr.build_sim(rtl_dir=_rtl_dir, output_dir=_sim_dir, extra_flags=_fl)
+                _ok, _sim_bin, _ = _vr.build_sim(
+                    rtl_dir=_rtl_dir, output_dir=_sim_dir, extra_flags=_fl
+                )
                 if _ok and _sim_bin:
                     _best_val_cycles = float("inf")
                     for _c in ctx.hwloop_candidates:
@@ -542,16 +561,19 @@ def _run_verification(
                             encoding=_enc_plain,
                             image=None,
                             specializer_dir=Path(__file__).resolve().parent.parent,
-                            fifo_depth=changeset.prefetch_fifo_depth or None,
+                            fifo_depth=changeset.prefetch_fifo_depth or 2,
                         )
                         if not _valid:
                             continue
                         _out = f"{_prog}_hw{hw}_{tag}_{_psrc.stem}_validated.s"
                         _patched, _ = _patch_asm(
-                            _psrc, _out, hw, _bm_dir,
+                            _psrc,
+                            _out,
+                            hw,
+                            _bm_dir,
                             encoding=_enc_plain,
                             valid_loops=_valid,
-                            fifo_depth=changeset.prefetch_fifo_depth or None,
+                            fifo_depth=changeset.prefetch_fifo_depth or 2,
                         )
                         if not _patched:
                             continue
@@ -602,7 +624,11 @@ def _run_verification(
                                 label=f"{tag}_{_psrc.stem}_validated",
                                 explicit_hex=_new_hex,
                             )
-                            if sim_v and sim_v.test_passed and sim_v.total_cycles < _best_val_cycles:
+                            if (
+                                sim_v
+                                and sim_v.test_passed
+                                and sim_v.total_cycles < _best_val_cycles
+                            ):
                                 _best_val_cycles = sim_v.total_cycles
                                 ctx.hwloop_only_hex_path = _new_hex
                                 ctx.hwloop_only_elf_path = str(_bm_dir / _elf)
@@ -662,9 +688,13 @@ def _run_verification(
                 _vr = VerilatorRunner(_make_sim_cfg(cfg))
                 _TB = {"COREV_PULP", "FPU", "NUM_MHPMCOUNTERS", "HW_LOOP", "COREV_CLUSTER", "ZFINX"}
                 _fl = [
-                    f for f in getattr(ctx, "verilator_extra_flags", []) if any(f.startswith(f"-G{p}=") for p in _TB)
+                    f
+                    for f in getattr(ctx, "verilator_extra_flags", [])
+                    if any(f.startswith(f"-G{p}=") for p in _TB)
                 ]
-                _ok, _sim_bin, _ = _vr.build_sim(rtl_dir=_rtl_dir, output_dir=_sim_dir, extra_flags=_fl)
+                _ok, _sim_bin, _ = _vr.build_sim(
+                    rtl_dir=_rtl_dir, output_dir=_sim_dir, extra_flags=_fl
+                )
                 if _ok and _sim_bin:
                     _valid = _prevalidate_loops(
                         _fused_merged,
@@ -676,7 +706,7 @@ def _run_verification(
                         encoding=_enc_fused,
                         image=FUSED_IMAGE,
                         specializer_dir=Path(__file__).resolve().parent.parent,
-                        fifo_depth=changeset.prefetch_fifo_depth or None,
+                        fifo_depth=changeset.prefetch_fifo_depth or 2,
                     )
                     if _valid:
                         _out = f"{_prog}_hw{hw}_{tag}_validated.s"
@@ -687,7 +717,7 @@ def _run_verification(
                             _bm_dir,
                             encoding=_enc_fused,
                             valid_loops=_valid,
-                            fifo_depth=changeset.prefetch_fifo_depth or None,
+                            fifo_depth=changeset.prefetch_fifo_depth or 2,
                         )
                         if _patched:
                             _elf = f"{_prog}_hw{hw}_{tag}_validated.elf"
@@ -709,7 +739,7 @@ def _run_verification(
                                 )
                                 if sim5b and sim5b.test_passed:
                                     print_info(
-                                        f"  {tag}: PASS after pre-validation ({sim5b.total_cycles:,} cycles, {len(_valid)} loops)"  # noqa: E501
+                                        f"  {tag}: PASS after pre-validation ({sim5b.total_cycles:,} cycles, {len(_valid)} loops)"
                                     )
                                     setattr(ctx, f"sim_{tag}", sim5b)
             if label_suffix:
@@ -742,8 +772,14 @@ def _run_verification(
             _sh.rmtree(sc.sim_dir, ignore_errors=True)
         runner_v = VerilatorRunner(_make_sim_cfg(cfg))
         _TB = {"COREV_PULP", "FPU", "NUM_MHPMCOUNTERS", "HW_LOOP", "COREV_CLUSTER", "ZFINX"}
-        flags = [f for f in getattr(ctx, "verilator_extra_flags", []) if any(f.startswith(f"-G{p}=") for p in _TB)]
-        ok, sim_bin, _ = runner_v.build_sim(rtl_dir=rtl_dir, output_dir=sc.sim_dir, extra_flags=flags)
+        flags = [
+            f
+            for f in getattr(ctx, "verilator_extra_flags", [])
+            if any(f.startswith(f"-G{p}=") for p in _TB)
+        ]
+        ok, sim_bin, _ = runner_v.build_sim(
+            rtl_dir=rtl_dir, output_dir=sc.sim_dir, extra_flags=flags
+        )
         if ok:
             sc.sim_bin = sim_bin
             print_info(f"  Sim built: {sim_bin}")
@@ -751,8 +787,15 @@ def _run_verification(
         print_error(f"  Sim build FAILED for {rtl_dir}")
         return None
 
-    def _run_exhaustive_selection(label_tag, *, rtl_all: str | None = None):
-        """Run per-loop selection. Requires explicit RTL dir for the fused+hwloop variant."""
+    def _run_exhaustive_selection(
+        label_tag, *, rtl_hwonly: str | None = None, rtl_all: str | None = None
+    ):
+        """Run per-loop selection. Requires explicit RTL dirs.
+
+        Args:
+            rtl_hwonly: RTL dir for HWLoop+Pruned exhaustive (no fused).
+            rtl_all:    RTL dir for All exhaustive (fused+hwloop).
+        """
         if not cfg.exhaustive_hwloop:
             return
         has_hl = ctx.hwloop_hex_path is not None
@@ -775,11 +818,13 @@ def _run_verification(
         hw_val = changeset.hw_loop_count
         link_script = "link_cv32e40p.ld"
         crt0_file = "crt0_cv32e40p.S"
-        bm_info.get("extra_ldflags", "").split() or None
+        extra_ld = bm_info.get("extra_ldflags", "").split() or None
         tag = label_tag.replace(" ", "_").lower()
-        hwlp_enc = getattr(changeset, "_hwlp_encoding", None) or getattr(ctx, "_hwlp_encoding", None)
+        hwlp_enc = getattr(changeset, "_hwlp_encoding", None) or getattr(
+            ctx, "_hwlp_encoding", None
+        )
         hwlp_enc_fused = getattr(ctx, "_hwlp_enc_fused", hwlp_enc)
-        getattr(ctx, "_hwlp_enc_plain", hwlp_enc)
+        hwlp_enc_plain = getattr(ctx, "_hwlp_enc_plain", hwlp_enc)
 
         # GA optimization on "All" (fused+hwloop+pruned) — uses sweep RTL
         # Run on BOTH nounroll and unroll merged sources, pick best
@@ -808,7 +853,9 @@ def _run_verification(
                         break
 
                 # Pass cached valid loops from sweep prevalidation if available
-                _cached_valid = getattr(_cand_for_variant, "_valid_loops", None) if _cand_for_variant else None
+                _cached_valid = (
+                    getattr(_cand_for_variant, "_valid_loops", None) if _cand_for_variant else None
+                )
 
                 result = _select_beneficial_loops(
                     fused_src,
@@ -822,11 +869,14 @@ def _run_verification(
                     specializer_dir=specializer_dir,
                     encoding=hwlp_enc_fused,
                     valid_loops=_cached_valid,
+                    fifo_depth=changeset.prefetch_fifo_depth or 2,
                 )
                 if result[0]:
                     sel_elf = f"{prog_name}_hw{hw_val}_sel_{tag}_{variant}.elf"
                     sel_hex = f"{prog_name}_hw{hw_val}_sel_{tag}_{variant}.hex"
-                    ok = _assemble_patched(specializer_dir, bm_dir, result[0], sel_elf, sel_hex, image=FUSED_IMAGE)
+                    ok = _assemble_patched(
+                        specializer_dir, bm_dir, result[0], sel_elf, sel_hex, image=FUSED_IMAGE
+                    )
                     if ok:
                         # Measure cycles using the SAME sim the GA used (sweep RTL)
                         import re as _re_ga
@@ -847,7 +897,9 @@ def _run_verification(
                             # Test merged function benefit before accepting
                             from arvis.pipeline.hwloop import _test_merged_functions
 
-                            if _cand_for_variant and getattr(_cand_for_variant, "_replaced_fns", None):
+                            if _cand_for_variant and getattr(
+                                _cand_for_variant, "_replaced_fns", None
+                            ):
                                 optimized = _test_merged_functions(
                                     _cand_for_variant,
                                     bm_dir,
@@ -904,7 +956,9 @@ def _run_verification(
                 ctx.fused_elf_path = best_ga_elf
 
     if sweep_winners and sweep_winners.best_adp > 0:
-        _set_candidate(sweep_winners.best_adp, getattr(sweep_winners.best_adp_result, "_candidate", None))
+        _set_candidate(
+            sweep_winners.best_adp, getattr(sweep_winners.best_adp_result, "_candidate", None)
+        )
         has_hwloop = ctx.hwloop_hex_path is not None
         has_hwloop_only = ctx.hwloop_only_hex_path is not None
 
@@ -919,7 +973,7 @@ def _run_verification(
         if not sweep_rtl:
             sweep_rtl = os.path.join(cfg.output_dir, f"rtl_hwloop_sweep_{hw_adp}_0", "rtl")
         if has_fusion and has_hwloop and sweep_rtl:
-            _run_exhaustive_selection("best_adp", rtl_all=sweep_rtl)
+            _run_exhaustive_selection("best_adp", rtl_hwonly=None, rtl_all=sweep_rtl)
 
         # Run step 5 with optimized hex
         if has_fusion and has_hwloop:
@@ -935,9 +989,11 @@ def _run_verification(
             # GA for best_perf too
             sweep_rtl_perf = getattr(sweep_winners.best_cycles_result, "_rtl_dir", None)
             if not sweep_rtl_perf:
-                sweep_rtl_perf = os.path.join(cfg.output_dir, f"rtl_hwloop_sweep_{hw_perf}_0", "rtl")
+                sweep_rtl_perf = os.path.join(
+                    cfg.output_dir, f"rtl_hwloop_sweep_{hw_perf}_0", "rtl"
+                )
             if has_fusion and ctx.hwloop_hex_path:
-                _run_exhaustive_selection("best_perf", rtl_all=sweep_rtl_perf)
+                _run_exhaustive_selection("best_perf", rtl_hwonly=None, rtl_all=sweep_rtl_perf)
             if has_fusion and ctx.hwloop_hex_path:
                 _run_step5(suffix)
     else:
@@ -950,7 +1006,7 @@ def _run_verification(
         if sweep_dirs:
             sweep_rtl_default = next(iter(sweep_dirs.values()), None)
         if has_fusion and has_hwloop and sweep_rtl_default:
-            _run_exhaustive_selection("default", rtl_all=sweep_rtl_default)
+            _run_exhaustive_selection("default", rtl_hwonly=None, rtl_all=sweep_rtl_default)
         if has_fusion and has_hwloop:
             _run_step5()
 
@@ -958,8 +1014,8 @@ def _run_verification(
 
 
 def _sweep_hwloop_candidates(
-    cfg: "ToolConfig",
-    ctx: "PipelineContext",
+    cfg: ToolConfig,
+    ctx: PipelineContext,
     changeset,
     prune_config_orig,
     all_used_orig: set,
@@ -969,11 +1025,26 @@ def _sweep_hwloop_candidates(
     For each candidate: set hw_loop_count on changeset, point ctx at
     candidate hex, apply full changeset, sim + synth.
 
-    Returns SweepWinners (best ADP + best cycles), or None if no candidates.
+    Phase 5 refactor
+    ----------------
+    The selection logic now goes through the unified
+    :class:`strategies.sweep.HWLoopDepthSweep`: we pre-compute
+    per-candidate metrics in this function (the dual-compile +
+    sim + synth + retry paths are deeply target-specific and
+    stay here), then hand the resulting metrics table to the
+    sweep, which selects the lowest-ADP depth via the same code
+    path used by the prefetch FIFO sweep.
+
+    The legacy two-winner output (``best_adp`` + ``best_cycles``)
+    is reconstructed from ``SweepDecision.all_results`` so the
+    runner's downstream code keeps working unchanged.
+
+    Returns SweepWinners (best ADP + best cycles), or None if no
+    candidates.
     """
     from arvis.cli import print_info, print_section
     from arvis.pipeline import verification
-    from arvis.pipeline.hwloop_sweep import HWLoopSweepResult, SweepWinners, pick_best
+    from arvis.pipeline.hwloop_sweep import HWLoopSweepResult, SweepWinners
 
     candidates = ctx.hwloop_candidates
     if len(candidates) <= 1:
@@ -993,7 +1064,9 @@ def _sweep_hwloop_candidates(
 
     for cand_idx, cand in enumerate(candidates):
         if not cand.fused_hex:
-            results.append(HWLoopSweepResult(hw_loop=cand.hw_loop, loops_patched=cand.loops_patched))
+            results.append(
+                HWLoopSweepResult(hw_loop=cand.hw_loop, loops_patched=cand.loops_patched)
+            )
             continue
 
         # Exactly like step 5: swap hw_loop + hex on the SAME changeset, apply
@@ -1027,7 +1100,9 @@ def _sweep_hwloop_candidates(
         r._candidate = cand  # store for GA reuse
         label = f"hwloop_sweep_{cand.hw_loop}_{cand_idx}"
 
-        synth = verification.run_synth_step(cfg, ctx, label=label, prune_config=changeset.prune_config)
+        synth = verification.run_synth_step(
+            cfg, ctx, label=label, prune_config=changeset.prune_config
+        )
         if synth and hasattr(synth, "pruned") and synth.pruned.success:
             r.cells = synth.pruned.cells
 
@@ -1045,7 +1120,7 @@ def _sweep_hwloop_candidates(
                 _prevalidate_loops,
             )
 
-            BENCHMARKS.get(cfg.benchmark_name, {})
+            bm_info = BENCHMARKS.get(cfg.benchmark_name, {})
             bm_dir_sw = Path(cfg.benchmark_dir).resolve()
             prog = cfg.benchmark_name.replace("embench_", "")
             enc_fused = getattr(ctx, "_hwlp_enc_fused", None)
@@ -1058,15 +1133,23 @@ def _sweep_hwloop_candidates(
                 vr = VerilatorRunner(_make_sim_cfg(cfg))
                 _TB = {"COREV_PULP", "FPU", "NUM_MHPMCOUNTERS", "HW_LOOP", "COREV_CLUSTER", "ZFINX"}
                 _fl = [
-                    f for f in getattr(ctx, "verilator_extra_flags", []) if any(f.startswith(f"-G{p}=") for p in _TB)
+                    f
+                    for f in getattr(ctx, "verilator_extra_flags", [])
+                    if any(f.startswith(f"-G{p}=") for p in _TB)
                 ]
-                ok, sim_bin, _ = vr.build_sim(rtl_dir=sweep_rtl_dir, output_dir=_sim_dir, extra_flags=_fl)
+                ok, sim_bin, _ = vr.build_sim(
+                    rtl_dir=sweep_rtl_dir, output_dir=_sim_dir, extra_flags=_fl
+                )
                 if not ok:
                     sim_bin = None
-            fused_merged = Path(cand.fused_src) if cand.fused_src else bm_dir_sw / f"{prog}_merged.s"
+            fused_merged = (
+                Path(cand.fused_src) if cand.fused_src else bm_dir_sw / f"{prog}_merged.s"
+            )
             if sim_bin and fused_merged.exists():
                 print_info(f"  {label}: FAIL — running per-loop pre-validation")
-                _baseline_src = Path(cand._standard_src) if getattr(cand, "_standard_src", None) else None
+                _baseline_src = (
+                    Path(cand._standard_src) if getattr(cand, "_standard_src", None) else None
+                )
                 valid = _prevalidate_loops(
                     fused_merged,
                     cand.hw_loop,
@@ -1125,5 +1208,97 @@ def _sweep_hwloop_candidates(
     ctx.sim_pruned = saved_sim_pruned
     ctx.synth_comparison = saved_synth
 
-    winners, _ = pick_best(results)
+    # Phase 5: hand off to the unified sweep framework for selection.
+    # The dual-compile + per-candidate sim + synth above produced
+    # the metrics table; the framework now picks the winner.
+    return _select_hwloop_winners(results)
+
+
+def _select_hwloop_winners(results):
+    """Translate per-candidate :class:`HWLoopSweepResult` records
+    into a :class:`SweepWinners` (best ADP + best cycles).
+
+    Phase 5 refactor: routes selection through
+    :class:`strategies.sweep.HWLoopDepthSweep` so the same code
+    path handles both the prefetch FIFO sweep and the HW_LOOP
+    sweep.  ``SweepDecision.best`` gives the ADP winner; the
+    cycles winner is a separate scan over ``all_results``.
+    """
+    from arvis.cli import print_warning
+    from arvis.pipeline.hwloop_sweep import SweepWinners
+    from arvis.strategies.sweep import HWLoopDepthSweep
+
+    # Build the metrics table the sweep evaluator expects.  We
+    # filter to passing candidates because non-passing entries
+    # are recorded as `passed=0` for the framework to skip during
+    # selection (and printed as ``FAIL`` in the legacy table).
+    candidates_by_depth: dict[int, dict[str, float]] = {}
+    for r in results:
+        candidates_by_depth[r.hw_loop] = {
+            "cycles": float(r.cycles),
+            "cells": float(r.cells),
+            "passed": 1.0 if r.passed else 0.0,
+        }
+
+    if not candidates_by_depth:
+        print_warning("No HW_LOOP candidates evaluated")
+        return SweepWinners()
+
+    sweep = HWLoopDepthSweep(candidates_by_depth=candidates_by_depth)
+    decision = sweep.analyze(workload=None, profile=None, target=None)
+
+    winners = SweepWinners()
+
+    # Best by ADP comes from the framework's selection.
+    if decision.best is not None:
+        adp_depth = int(decision.best.candidate["HW_LOOP"])
+        winners.best_adp = adp_depth
+        # Find the matching legacy result record.
+        adp_result = next((r for r in results if r.hw_loop == adp_depth and r.passed), None)
+        winners.best_adp_result = adp_result
+
+        # Best by cycles is a separate scan: the framework's cost
+        # function is ADP, but we surface the cycles winner too.
+        passing = [r for r in results if r.passed and r.cells > 0]
+        if passing:
+            by_cycles = min(passing, key=lambda r: r.cycles)
+            winners.best_cycles = by_cycles.hw_loop
+            winners.best_cycles_result = by_cycles
+            winners.same = winners.best_adp == winners.best_cycles
+    else:
+        print_warning("No valid HW_LOOP results — disabling")
+
+    # Print the legacy table format (mirrors hwloop_sweep.pick_best
+    # output so log scrapers and reports keep working).
+    _print_hwloop_sweep_table(results, winners)
     return winners
+
+
+def _print_hwloop_sweep_table(results, winners):
+    """Reproduce the legacy HW_LOOP sweep table format."""
+    print(f"\n  {'HW_LOOP':>7s}  {'Loops':>5s}  {'Cycles':>12s}  {'Cells':>8s}  {'ADP':>10s}")
+    print(f"  {'─' * 7}  {'─' * 5}  {'─' * 12}  {'─' * 8}  {'─' * 10}")
+    for r in results:
+        if not r.passed:
+            print(f"  {r.hw_loop:>7d}  {r.loops_patched:>5d}  {'FAIL':>12s}")
+            continue
+        markers = []
+        if r.hw_loop == winners.best_adp:
+            markers.append("best ADP")
+        if r.hw_loop == winners.best_cycles:
+            markers.append("best cycles")
+        tag = f" ◀ {', '.join(markers)}" if markers else ""
+        print(
+            f"  {r.hw_loop:>7d}  {r.loops_patched:>5d}  {r.cycles:>12,}  "
+            f"{r.cells:>8,}  {r.adp:>10.2f}{tag}"
+        )
+
+    if winners.best_adp == 0:
+        return
+    if winners.same:
+        print(f"\n  → HW_LOOP={winners.best_adp}: best ADP and best cycles")
+    else:
+        print(
+            f"\n  → HW_LOOP={winners.best_adp} (best ADP), "
+            f"HW_LOOP={winners.best_cycles} (best cycles)"
+        )
