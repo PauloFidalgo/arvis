@@ -202,4 +202,5 @@ class UsageDrivenPruner(PruningStrategy):
             removable_opcode_groups=removable_opcode_groups,
             feature_flags=feature_flags,
             used_instructions=frozenset(used_instructions),
+            target_payload=prune_config,
         )

@@ -113,6 +113,16 @@ class PruneDecision(Decision):
     used_instructions:
         Set of instructions actually observed in the workload — used
         by the target to leave their datapath enabled.
+    target_payload:
+        Phase 2 migration bridge.  Strategies that delegate to
+        legacy code populate this with the underlying
+        target-specific config object (e.g. the legacy
+        :class:`codegen.rtl.rtl_pruning.PruneConfig`) so the
+        target's render path can hand it directly to the legacy
+        emitter without having to re-translate from the typed
+        fields.  Phase 3 will remove this slot once all the
+        relevant data is carried in typed Decision fields.
+        Treat as opaque from outside the strategy/target pair.
     """
 
     removable_alu_ops: FrozenSet[str] = field(default_factory=frozenset)
@@ -120,6 +130,7 @@ class PruneDecision(Decision):
     removable_opcode_groups: FrozenSet[str] = field(default_factory=frozenset)
     feature_flags: Dict[str, bool] = field(default_factory=dict)
     used_instructions: FrozenSet[str] = field(default_factory=frozenset)
+    target_payload: Optional[Any] = None
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
         # Phase 1: rendering is still done by the legacy
@@ -146,6 +157,10 @@ class FusionDecision(Decision):
     fused_ops:
         Ordered list of fused operations.  Order matters because
         opcode slots are filled deterministically.
+    target_payload:
+        Phase 2 migration bridge -- mirrors :attr:`PruneDecision.target_payload`.
+        For :class:`NGramFusion` this carries the legacy fusion
+        registry / encoding info needed by the cv32e40p RTL emitter.
     """
 
     # We use a tuple rather than a Python list because Decision is
@@ -153,6 +168,7 @@ class FusionDecision(Decision):
     # carries them as-is via the existing dataclass; Phase 3 will
     # define a target-agnostic FusedOp type.
     fused_ops: Tuple[Any, ...] = field(default_factory=tuple)
+    target_payload: Optional[Any] = None
 
     def render(self, target: "TargetCore") -> List["RTLPatch"]:
         return []

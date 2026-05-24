@@ -250,3 +250,33 @@ class CV32E40P(TargetCore):
         from arvis.targets.cv32e40p.patches import WidthNarrowingPatch
 
         return [WidthNarrowingPatch(decision=decision)]
+
+    def render_prune_decision(self, decision, workspace):
+        """Render a :class:`PruneDecision` to a list of patches.
+
+        Returns a single :class:`PrunePatch`.  When
+        ``decision.target_payload`` carries the legacy
+        :class:`PruneConfig` (always true for
+        :class:`UsageDrivenPruner`), the patch hands it directly to
+        the legacy :class:`RTLPruner`; otherwise the patch
+        reconstructs a minimal ``PruneConfig`` from the typed
+        Decision fields.
+        """
+        from arvis.targets.cv32e40p.patches import PrunePatch
+
+        return [PrunePatch(decision=decision)]
+
+    def render_fusion_decision(self, decision, workspace):
+        """Render a :class:`FusionDecision` to a list of patches.
+
+        Returns a single :class:`FusionPatch`.  Empty decisions
+        (no fused ops) produce a no-op patch.
+
+        Pre-requisite: the workspace must already be in its
+        post-pruning state (PrunePatch run first) when the
+        variant includes pruning, because fusion patches operate
+        on the surviving decoder/ALU files.
+        """
+        from arvis.targets.cv32e40p.patches import FusionPatch
+
+        return [FusionPatch(decision=decision)]
