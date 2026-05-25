@@ -31,8 +31,9 @@ When not specified, defaults are inferred from the phase selection:
 import argparse
 import sys
 
-from arvis.config import BENCHMARKS, ToolConfig
 from toolchain import check_prerequisites
+
+from arvis.config import BENCHMARKS, ToolConfig
 
 # ── Phase definitions ──
 # Ordered list of phase names for --until selection
@@ -230,6 +231,32 @@ Combined:
         ),
     )
 
+    # ── Phase 9: configurable variant set (Pipeline path only) ──
+    parser.add_argument(
+        "--variants",
+        default=None,
+        metavar="NAMES",
+        help=(
+            "Comma-separated subset of standard variants to emit "
+            "(e.g. 'pruned,fused_pruned').  Looked up in the target's "
+            "standard_variants catalogue; case-insensitive.  Without "
+            "this flag, the full standard set is emitted.  Used by "
+            "the --use-pipeline-runner path."
+        ),
+    )
+    parser.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        metavar="LABEL=ATOMS",
+        help=(
+            "Inline custom variant: 'label=atom1+atom2+...'.  Atoms: "
+            "prune | fuse | loop | width | none.  Repeatable.  "
+            "Example: --variant my_combo=prune+loop "
+            "--variant fusion_only=fuse.  Composes with --variants."
+        ),
+    )
+
     # ── Phase 4.2: structured logging ──
     parser.add_argument(
         "--log-level",
@@ -308,6 +335,13 @@ Combined:
         _os.environ["ARVIS_USE_PORTABILITY"] = "1"
         cfg.use_portability = True
 
+    # Phase 9: variant selection flags (consumed by
+    # _run_verification_via_pipeline).  Stored as raw strings;
+    # resolution happens at use-site so the resolver can access
+    # the target's standard_variants catalogue.
+    cfg.variants_arg = args.variants  # str | None
+    cfg.variant_arg = list(args.variant or [])  # list[str]
+
     return cfg
 
 
@@ -326,6 +360,13 @@ def main():
     print_metric("RF write port B", "PRUNE" if cfg.prune_rf_write_b else "KEEP")
     if cfg.use_pipeline_runner:
         print_metric("Verification mode", "Pipeline.run_full_verification (Phase 7)")
+    if cfg.variants_arg or cfg.variant_arg:
+        parts = []
+        if cfg.variants_arg:
+            parts.append(f"--variants={cfg.variants_arg}")
+        for spec in cfg.variant_arg:
+            parts.append(f"--variant={spec}")
+        print_metric("Variants", " ".join(parts))
     print()
 
     # ── Prerequisites (toolchain, build, trace) ──

@@ -96,6 +96,12 @@ def run_pipeline(cfg: ToolConfig, ctx: PipelineContext) -> None:
             )
 
     # ── HTML Report ──
+    # Stash final changeset state onto ctx for the report to read.
+    ctx.final_hw_loop_count = changeset.hw_loop_count  # type: ignore[attr-defined]
+    ctx.final_prefetch_fifo_depth = changeset.prefetch_fifo_depth  # type: ignore[attr-defined]
+    ctx.final_pc_width = getattr(changeset, "pc_width", None)  # type: ignore[attr-defined]
+    ctx.final_changeset = changeset  # type: ignore[attr-defined]
+
     from arvis.cli import print_success
     from arvis.report.html_report import generate_html_report
 
@@ -253,7 +259,10 @@ def _run_analysis(cfg: ToolConfig, ctx: PipelineContext, changeset) -> None:
         if bottleneck.fetch_stalls > bottleneck.total_cycles * 0.05:
             from arvis.pipeline.prefetch_sweep import sweep_prefetch_depth
 
-            best_depth, _ = sweep_prefetch_depth(cfg, ctx)
+            best_depth, fifo_results = sweep_prefetch_depth(cfg, ctx)
+            # Stash for the HTML report (Phase 9 observability).
+            ctx.fifo_sweep_results = fifo_results  # type: ignore[attr-defined]
+            ctx.fifo_chosen_depth = best_depth  # type: ignore[attr-defined]
             if best_depth > 0:
                 changeset.prefetch_fifo_depth = best_depth
 
@@ -444,7 +453,9 @@ def _loop_selection_via_sweep(
         if not eligible:
             continue
 
-        loop_keys = [(loop.start_label, loop.start_line, loop.back_branch_insn) for loop in eligible]
+        loop_keys = [
+            (loop.start_label, loop.start_line, loop.back_branch_insn) for loop in eligible
+        ]
         N = len(loop_keys)
         print_info(f"  {N} eligible loops → sweep via {'exhaustive' if N <= 6 else 'GA'}")
 
@@ -499,7 +510,9 @@ def _loop_selection_via_sweep(
 
             sel_elf = f"{prog_name}_hw{hw_val}_sweep_sel_{tag}_{variant}.elf"
             sel_hex = f"{prog_name}_hw{hw_val}_sweep_sel_{tag}_{variant}.hex"
-            ok = _assemble_patched(specializer_dir, bm_dir, patched_path, sel_elf, sel_hex, image=image)
+            ok = _assemble_patched(
+                specializer_dir, bm_dir, patched_path, sel_elf, sel_hex, image=image
+            )
             if ok:
                 best_cycles = sweep_cycles
                 best_hex = str(bm_dir / sel_hex)
@@ -590,8 +603,8 @@ def _run_verification_via_pipeline(
     try:
         toolchain = RISCVGCCToolchain()
     except ToolchainError:
-        from arvis.core.toolchain import CompiledArtifact, Toolchain
         from arvis.core.isa import ISADescriptor
+        from arvis.core.toolchain import Toolchain
 
         class _NullToolchain(Toolchain):
             @property
@@ -640,7 +653,33 @@ def _run_verification_via_pipeline(
     out_root = Path(cfg.output_dir)
     pipeline._output_root_for_workload = lambda wl: out_root  # type: ignore[method-assign]
 
-    result = pipeline.run_full_verification(workload)
+    # Phase 9: resolve --variants / --variant CLI flags.  When
+    # neither was specified, fall back to the target's full
+    # standard set via run_full_verification().
+    from arvis.pipeline.variant_resolver import VariantResolutionError, resolve_variants
+
+    try:
+        custom_variants = resolve_variants(
+            names=getattr(cfg, "variants_arg", None),
+            inline_specs=getattr(cfg, "variant_arg", None),
+            target=target,
+        )
+    except VariantResolutionError as exc:
+        from arvis.cli import print_error
+
+        print_error(f"Variant resolution failed: {exc}")
+        raise
+
+    if custom_variants is None:
+        # No flags → emit the target's full standard set.
+        result = pipeline.run_full_verification(workload)
+    else:
+        # Custom set → bypass run_full_verification and use Pipeline.run
+        # directly with the resolved list.
+        labels = ", ".join(v.label for v in custom_variants)
+        print_section(f"VERIFICATION variants: {labels}")
+        pipeline.variants = custom_variants
+        result = pipeline.run(workload)
 
     # Stash per-variant results on ctx so the HTML reporter can
     # pick them up.  Also expose for downstream tools.
@@ -1402,7 +1441,13 @@ def _sweep_hwloop_candidates(
     # Phase 5: hand off to the unified sweep framework for selection.
     # The dual-compile + per-candidate sim + synth above produced
     # the metrics table; the framework now picks the winner.
-    return _select_hwloop_winners(results)
+    winners = _select_hwloop_winners(results)
+
+    # Stash full sweep results on ctx for HTML report observability (Phase 9).
+    ctx.hwloop_sweep_results = results  # type: ignore[attr-defined]
+    ctx.hwloop_winners = winners  # type: ignore[attr-defined]
+
+    return winners
 
 
 def _evaluate_hwloop_via_pipeline(
@@ -1711,6 +1756,7 @@ def _select_hwloop_winners(results):
     # Print the legacy table format (mirrors hwloop_sweep.pick_best
     # output so log scrapers and reports keep working).
     _print_hwloop_sweep_table(results, winners)
+
     return winners
 
 
