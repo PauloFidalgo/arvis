@@ -61,5 +61,5 @@ repos:
     rev: v2.3.0
     hooks:
       - id: codespell
-        args: ["--ignore-words-list=hsi,fo,ot,nd,ba,inout"]
+        args: ["--ignore-words-list=hsi,fo,ot,nd,ba,inout,fle"]
         exclude: '/rtl/|/rtl_modified/|\.hex$|\.elf$|\.s$'

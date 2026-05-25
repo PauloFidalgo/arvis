@@ -281,16 +281,59 @@ class CV32E40P(TargetCore):
     ) -> list[RTLPatch]:
         """Render a :class:`PruneDecision` to a list of patches.
 
-        Returns a single :class:`PrunePatch`.  The patch
-        reconstructs a legacy :class:`PruneConfig` from the
-        typed Decision fields (lossless versus the original
-        ``compute_prune_config`` output) and hands it to the
-        legacy :class:`RTLPruner`.  Equivalence is verified by
-        ``examples/portability_equivalence.py``.
+        Phase 8 dispatches between two implementations:
+
+        * **Declarative** (``decision.unused_features`` populated):
+          returns a :class:`FeatureRemovalPatch` that consults
+          :attr:`features` and applies :class:`RemovalAction` /
+          :class:`CustomAction` items via the generic primitives
+          in :mod:`core.rtl_primitives`.
+
+        * **Legacy field-based** (default): returns a single
+          :class:`PrunePatch` that reconstructs a legacy
+          :class:`PruneConfig` from the typed Decision fields
+          and hands it to :class:`RTLPruner`.
+
+        Both paths can be active simultaneously: when both
+        ``unused_features`` and the legacy fields are populated,
+        ``FeatureRemovalPatch`` runs first, then ``PrunePatch``
+        applies the remaining field-based rewrites.  Equivalence
+        is verified by ``examples/portability_equivalence.py``.
         """
+        from arvis.core.feature_patch import FeatureRemovalPatch
         from arvis.targets.cv32e40p.patches import PrunePatch
 
-        return [PrunePatch(decision=decision)]
+        patches: list[RTLPatch] = []
+
+        # Declarative path first (idempotent against the legacy patch).
+        if decision.unused_features:
+            patches.append(FeatureRemovalPatch(decision=decision, target=self))
+
+        # Legacy field-based path runs whenever the legacy fields
+        # are populated.  An empty decision short-circuits at the
+        # PrunePatch level.
+        if (
+            decision.removable_alu_ops
+            or decision.removable_mul_modes
+            or decision.removable_opcode_groups
+            or decision.feature_flags
+            or decision.target_overlay
+        ):
+            patches.append(PrunePatch(decision=decision))
+
+        return patches
+
+    @property
+    def features(self) -> tuple:
+        """The declarative feature surface for cv32e40p.
+
+        See :mod:`targets.cv32e40p.features` for the data.
+        Consumed by :class:`FeatureBasedPruner` and
+        :class:`FeatureRemovalPatch`.
+        """
+        from arvis.targets.cv32e40p.features import CV32E40P_FEATURES
+
+        return CV32E40P_FEATURES
 
     def render_fusion_decision(
         self, decision: FusionDecision, workspace: RTLWorkspace

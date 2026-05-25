@@ -118,6 +118,48 @@ class WorkloadProfile:
     elf_paths: tuple[Path, ...] = field(default_factory=tuple)
     extra: Mapping[str, object] = field(default_factory=dict)
 
+    # ── Helpers for feature-predicate authoring ──────────────────
+    # These are the building blocks for CoreFeature.usage_predicate
+    # callables.  They keep predicate code readable:
+    #
+    #     usage_predicate=lambda p: p.uses_any(("div", "divu", "rem"))
+    #
+    # New helpers can be added freely; they're target-agnostic.
+
+    def uses(self, mnemonic: str) -> bool:
+        """True iff the workload's disassembly contains ``mnemonic``."""
+        return self.instr_histogram.get(mnemonic, 0) > 0
+
+    def uses_any(self, mnemonics: tuple[str, ...] | list[str]) -> bool:
+        """True iff the workload uses any of ``mnemonics``."""
+        return any(self.uses(m) for m in mnemonics)
+
+    def uses_prefix(self, prefix: str) -> bool:
+        """True iff any used mnemonic starts with ``prefix``.
+
+        Convenience for opcode families: ``uses_prefix("div")``
+        catches ``div``, ``divu``, ``divuw`` etc. in one call.
+        """
+        return any(m.startswith(prefix) for m in self.instr_histogram)
+
+    def total_instructions(self) -> int:
+        """Sum of all instruction counts in the histogram."""
+        return sum(self.instr_histogram.values())
+
+    def density(self, mnemonics: tuple[str, ...] | list[str]) -> float:
+        """Fraction of instructions matching ``mnemonics``.
+
+        Returns 0.0 when the histogram is empty.  Useful for
+        threshold-based predicates::
+
+            usage_predicate=lambda p: p.density(("beq", "bne", "blt", "bge")) > 0.05
+        """
+        total = self.total_instructions()
+        if total == 0:
+            return 0.0
+        hit = sum(self.instr_histogram.get(m, 0) for m in mnemonics)
+        return hit / total
+
 
 # ─── Workload abstract base ────────────────────────────────────────
 

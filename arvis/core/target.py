@@ -249,6 +249,25 @@ class TargetCore(ABC):
         an ``example_tb/``) or out-of-tree.
         """
 
+    # ── Features (declarative pruning surface) ─────────────────────
+    @property
+    def features(self) -> tuple:
+        """Declarative list of removable/configurable features.
+
+        Concrete targets override this to expose their feature
+        surface as a tuple of :class:`core.feature.CoreFeature`.
+        :class:`strategies.pruning.feature_based.FeatureBasedPruner`
+        consumes this property.
+
+        The default returns an empty tuple, which makes the
+        feature-based pruner a no-op for unconfigured targets.
+
+        Returning ``tuple`` rather than ``tuple[CoreFeature, ...]``
+        avoids a forward reference to :class:`CoreFeature`;
+        concrete overrides annotate the return type.
+        """
+        return ()
+
     # ── Variants ───────────────────────────────────────────────────
     @property
     def standard_variants(self) -> tuple:

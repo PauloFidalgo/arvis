@@ -174,6 +174,18 @@ class PruneDecision(Decision):
     removable_csr_storage: frozenset[str] = Field(default_factory=frozenset)
     target_overlay: dict[str, int] = Field(default_factory=dict)
 
+    # ── Phase 8: Declarative feature-based pruning ─────────────────
+    unused_features: frozenset[str] = Field(default_factory=frozenset)
+    """Names of :class:`core.feature.CoreFeature` instances that
+    are scheduled for removal.  Populated by
+    :class:`FeatureBasedPruner`; consumed by
+    :class:`FeatureRemovalPatch` which dispatches each feature's
+    declarative actions to :mod:`core.rtl_primitives`.
+
+    Empty (the default) means the legacy field-based path is
+    used.  Both forms can coexist; a target's
+    ``render_prune_decision`` checks this field first."""
+
     @field_validator("used_regs_mask")
     @classmethod
     def _used_regs_mask_non_negative(cls, v: int) -> int:
