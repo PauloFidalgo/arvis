@@ -242,6 +242,19 @@ class CV32E40P(TargetCore):
         """Path to the Verilator testbench shipped with the core."""
         return self._rtl_root / "example_tb" / "core"
 
+    # ── Variants ───────────────────────────────────────────────────
+    @property
+    def standard_variants(self) -> tuple:
+        """The canonical 5-variant set for cv32e40p.
+
+        Returns ``(BASELINE, PRUNED, FUSED_PRUNED, HWLOOP_PRUNED, ALL)``.
+        Used by :meth:`Pipeline.run_full_verification` to drive
+        every standard variant through the unified pipeline path.
+        """
+        from arvis.targets.cv32e40p.variants import STANDARD_VARIANTS
+
+        return STANDARD_VARIANTS
+
     # ── Decision rendering (Phase 2) ──────────────────────────────
     # Each render_* method translates one Decision shape into a
     # list of RTLPatches that the pipeline applies in order to a

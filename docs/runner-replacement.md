@@ -188,3 +188,91 @@ dependency, no integration with the legacy ``RTLChangeSet``.
 * ``pipeline/runner.py:_evaluate_hwloop_via_pipeline``
                                              gateway dispatch
 * ``tests/portability/test_phase6.py``      contract tests
+
+## Phase 6.7: Toolchain + full verification
+
+Phase 6.7 closes the last major abstract-API gap:
+
+### New files
+
+* ``toolchains/riscv_gcc.py`` — ``RISCVGCCToolchain``: concrete
+  ``Toolchain`` wrapping ``riscv32-unknown-elf-gcc`` + binutils.
+  ``compile()``, ``assemble()``, ``disassemble()`` all verified
+  end-to-end.  Fails fast when GCC isn't installed.
+
+### Changed files
+
+* ``workloads/benchmark.py`` — ``BenchmarkWorkload.hex_for_variant()``
+  now resolves variant labels to real hex paths using the naming
+  convention: ``<name>.hex`` (baseline/pruned),
+  ``<name>_fused.hex`` (fused_pruned/all),
+  ``<name>_hw1.hex`` (hwloop_pruned).
+
+* ``core/pipeline.py`` — ``Pipeline.run_full_verification(workload)``
+  convenience method that sets ``self.variants`` to the 5 standard
+  variants and delegates to ``run()``.  Restores original variants
+  on exit.
+
+### Tests
+
+* ``tests/portability/test_pipeline_e2e.py`` — 15 integration tests
+  covering all 5 variants through mock verifier + synth, hex
+  resolution, toolchain construction, and reporter output.
+
+### Pointers
+
+* ``toolchains/__init__.py``                package re-export
+* ``toolchains/riscv_gcc.py``               RISCVGCCToolchain
+* ``workloads/benchmark.py``                hex_for_variant
+* ``core/pipeline.py``                      run_full_verification
+* ``tests/portability/test_pipeline_e2e.py`` integration tests
+
+## Phase 7: Top-level verification gateway
+
+Phase 7 wires the top-level dispatch in ``run_pipeline``:
+
+### What changed
+
+* ``pipeline/runner.py`` — added
+  ``_run_verification_via_pipeline()``: builds a ``Pipeline``
+  from ``CV32E40P`` + the 4 standard strategies (fusion, hwloop,
+  pruning, width) + ``VerilatorVerifier`` +
+  ``YosysSynthesisFlow`` + ``MarkdownReporter``, points the
+  workload at ``cfg.benchmark_dir``, invokes
+  ``Pipeline.run_full_verification(workload)``, and stashes the
+  ``PipelineResult`` on ``ctx.pipeline_result``.
+
+* ``pipeline/runner.py:run_pipeline`` — dispatches to the new
+  function when ``cfg.use_pipeline_runner`` is set; otherwise
+  the legacy ``_run_verification`` runs unchanged.
+
+* ``pipeline/context.py`` — added ``pipeline_result`` field for
+  downstream consumers.
+
+* ``main.py`` — prints ``Verification mode: Pipeline.run_full_verification``
+  when the flag is active.
+
+### What this enables
+
+Running ``main.py --benchmark <name> --use-pipeline-runner``
+now:
+
+1. Runs analysis / fusion / hwloop / pruning the legacy way
+   (these phases require Docker GCC + assembly patching that
+   isn't yet portable).
+2. Routes the 5-variant emission + sim + synth through
+   ``Pipeline.run_full_verification`` with full target-agnostic
+   plumbing.
+3. Produces a ``report.md`` markdown summary in addition to the
+   legacy HTML report.
+
+The byte-equivalence between the new path and legacy was
+already validated in Phase 2.7c
+(``examples/portability_equivalence.py`` shows 5/5 byte-identical).
+
+### Pointers
+
+* ``pipeline/runner.py:_run_verification_via_pipeline``
+* ``pipeline/runner.py:run_pipeline`` dispatch site
+* ``pipeline/context.py:pipeline_result``
+* ``tests/portability/test_phase7_gateway.py`` — 4 integration tests

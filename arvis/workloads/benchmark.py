@@ -146,6 +146,50 @@ class BenchmarkWorkload(Workload):
             targets=("all",),
         )
 
+    # ── Hex resolution ───────────────────────────────────────────
+    def hex_for_variant(self, variant_label: str) -> Path | None:
+        """Map a variant label to the pre-built hex in bench_dir.
+
+        Naming convention (matches legacy pipeline outputs):
+
+        * ``baseline`` / ``pruned`` → ``<name>.hex``
+          (pruning is RTL-only; the binary is unchanged)
+        * ``fused_pruned`` → ``<name>_fused.hex``
+        * ``hwloop_pruned`` → ``<name>_hw1.hex`` (depth-1 default)
+        * ``all`` → ``<name>_fused.hex``
+          (the "all" variant uses the fused binary; hwloop
+          patching is assembly-level and doesn't change the hex)
+
+        Returns ``None`` when the expected file doesn't exist,
+        which safely skips simulation for that variant.
+        """
+        name = self._name
+        candidates: list[Path]
+
+        if variant_label in ("baseline", "pruned"):
+            candidates = [
+                self._bench_dir / f"{name}.hex",
+                self._bench_dir / f"{name}_docker_baseline.hex",
+            ]
+        elif variant_label == "fused_pruned":
+            candidates = [self._bench_dir / f"{name}_fused.hex"]
+        elif variant_label == "hwloop_pruned":
+            # Prefer hw1 (depth-1), fall back to hw2, then generic _hwloop
+            candidates = [
+                self._bench_dir / f"{name}_hw1.hex",
+                self._bench_dir / f"{name}_hw2.hex",
+                self._bench_dir / f"{name}_hwloop.hex",
+            ]
+        elif variant_label == "all":
+            candidates = [self._bench_dir / f"{name}_fused.hex"]
+        else:
+            candidates = [self._bench_dir / f"{name}_{variant_label}.hex"]
+
+        for p in candidates:
+            if p.exists():
+                return p
+        return None
+
     # ── Profile ────────────────────────────────────────────────────
     def profile(self, toolchain: Toolchain) -> WorkloadProfile:
         """Collect ELFs and (best-effort) instruction histogram.

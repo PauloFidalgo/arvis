@@ -24,17 +24,11 @@ factored out from ``codegen/rtl/`` into ``targets/cv32e40p/``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
 )
 
 if TYPE_CHECKING:
@@ -75,8 +69,8 @@ class CoreParameter:
 
     name: str
     default: int
-    minimum: Optional[int] = None
-    maximum: Optional[int] = None
+    minimum: int | None = None
+    maximum: int | None = None
     description: str = ""
 
     def clamp(self, value: int) -> int:
@@ -102,9 +96,9 @@ class OpcodeSlot:
     """
 
     opcode: int
-    funct3: Optional[int] = None
-    funct2: Optional[int] = None
-    funct7: Optional[int] = None
+    funct3: int | None = None
+    funct2: int | None = None
+    funct7: int | None = None
     label: str = ""  # human-readable, e.g. "CUSTOM_0/funct3=001"
 
 
@@ -124,8 +118,8 @@ class OpcodeSpace:
     """
 
     name: str
-    available: List[OpcodeSlot] = field(default_factory=list)
-    consumed: List[OpcodeSlot] = field(default_factory=list)
+    available: list[OpcodeSlot] = field(default_factory=list)
+    consumed: list[OpcodeSlot] = field(default_factory=list)
 
     def allocate(self) -> OpcodeSlot:
         """Return the next free slot.
@@ -181,7 +175,7 @@ class TargetCore(ABC):
 
     @property
     @abstractmethod
-    def isa(self) -> "ISADescriptor":
+    def isa(self) -> ISADescriptor:
         """The standard ISA implemented by this core."""
 
     # ── RTL surface ────────────────────────────────────────────────
@@ -197,7 +191,7 @@ class TargetCore(ABC):
         """
 
     @abstractmethod
-    def synthesizable_files(self) -> List[Path]:
+    def synthesizable_files(self) -> list[Path]:
         """The list of files that the synthesis flow should compile.
 
         Returned paths are relative to :attr:`rtl_root`.
@@ -205,7 +199,7 @@ class TargetCore(ABC):
 
     # ── Parameters ─────────────────────────────────────────────────
     @abstractmethod
-    def parameters(self) -> List[CoreParameter]:
+    def parameters(self) -> list[CoreParameter]:
         """Tunable parameters exposed to strategies.
 
         Strategies look up parameters by name and clamp values
@@ -213,7 +207,7 @@ class TargetCore(ABC):
         a decision.
         """
 
-    def parameter(self, name: str) -> Optional[CoreParameter]:
+    def parameter(self, name: str) -> CoreParameter | None:
         """Convenience lookup by name."""
         for p in self.parameters():
             if p.name == name:
@@ -238,7 +232,7 @@ class TargetCore(ABC):
 
     @property
     @abstractmethod
-    def memory_layout(self) -> Mapping[str, Tuple[int, int]]:
+    def memory_layout(self) -> Mapping[str, tuple[int, int]]:
         """Symbolic ``{region: (start, size)}`` map.
 
         Used by analyses (e.g. PC width derivation) and by the
@@ -255,13 +249,30 @@ class TargetCore(ABC):
         an ``example_tb/``) or out-of-tree.
         """
 
+    # ── Variants ───────────────────────────────────────────────────
+    @property
+    def standard_variants(self) -> tuple:
+        """Canonical variant set for this target.
+
+        Concrete targets override to expose their canonical
+        variant tuple (e.g. cv32e40p exposes baseline / pruned /
+        fused_pruned / hwloop_pruned / all).  The default returns
+        an empty tuple, which makes
+        :meth:`Pipeline.run_full_verification` a no-op for
+        unconfigured targets.
+
+        The return type is intentionally weak (``tuple``) to
+        avoid a forward reference to
+        :class:`core.pipeline.VariantConfig`; concrete overrides
+        return ``tuple[VariantConfig, ...]``.
+        """
+        return ()
+
     # ── Decision rendering ─────────────────────────────────────────
     # In Phase 1 these are stubs.  Phase 3 fills them in by moving
     # codegen/rtl/* and codegen/hwloop/* logic into target subclasses.
 
-    def render_decision(
-        self, decision: "Decision", workspace: "RTLWorkspace"
-    ) -> List["RTLPatch"]:
+    def render_decision(self, decision: Decision, workspace: RTLWorkspace) -> list[RTLPatch]:
         """Translate a single decision into RTL patches.
 
         Default dispatch by decision type.  Subclasses override the
@@ -287,21 +298,21 @@ class TargetCore(ABC):
         raise TypeError(f"Unknown decision type: {type(decision).__name__}")
 
     def render_prune_decision(
-        self, decision: "PruneDecision", workspace: "RTLWorkspace"
-    ) -> List["RTLPatch"]:
+        self, decision: PruneDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         return []
 
     def render_fusion_decision(
-        self, decision: "FusionDecision", workspace: "RTLWorkspace"
-    ) -> List["RTLPatch"]:
+        self, decision: FusionDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         return []
 
     def render_loop_decision(
-        self, decision: "LoopDecision", workspace: "RTLWorkspace"
-    ) -> List["RTLPatch"]:
+        self, decision: LoopDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         return []
 
     def render_width_decision(
-        self, decision: "WidthDecision", workspace: "RTLWorkspace"
-    ) -> List["RTLPatch"]:
+        self, decision: WidthDecision, workspace: RTLWorkspace
+    ) -> list[RTLPatch]:
         return []

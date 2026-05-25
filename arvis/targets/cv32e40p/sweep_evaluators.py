@@ -394,8 +394,171 @@ def _copy_rtl_with_fifo_depth(rtl_root: str, output_dir: str, depth: int) -> Non
         pfb.write_text(text)
 
 
+# ─── Phase 6.7: Per-loop selection evaluator ──────────────────────
+
+
+@dataclass
+class LoopSelectionEvaluator:
+    """Evaluate one loop on/off mask via assemble + simulate.
+
+    Each :class:`SweepCandidate` carries ``loop_0``, ``loop_1``,
+    ... parameters (0 or 1).  The evaluator:
+
+    1. Builds the binary mask from the candidate overrides.
+    2. Patches the source assembly with only the enabled loops.
+    3. Assembles via Docker or native GCC.
+    4. Simulates via the provided sim binary.
+    5. Returns ``{"cycles": int, "passed": bool}``.
+
+    Parameters
+    ----------
+    src_asm:
+        Path to the merged assembly source.
+    loop_keys:
+        Ordered list of ``(start_label, start_line, back_branch_insn)``
+        tuples identifying each eligible loop.
+    hw_loop:
+        HW_LOOP nest depth (2, 3, 4, or 6).
+    bm_dir:
+        Benchmark directory (working dir for assembly).
+    sim_bin:
+        Path to the Verilator sim binary.
+    link_script:
+        Linker script filename (relative to bm_dir).
+    crt0:
+        CRT0 filename (relative to bm_dir).
+    image:
+        Docker image for assembly (None = native GCC).
+    specializer_dir:
+        Path to the specializer root (for Docker builds).
+    encoding:
+        HW_LOOP encoding object (passed to HWLoopGenerator).
+    fifo_depth:
+        Prefetch FIFO depth for loop detection.
+    """
+
+    src_asm: Path
+    loop_keys: list
+    hw_loop: int
+    bm_dir: Path
+    sim_bin: str
+    link_script: str = "link_cv32e40p.ld"
+    crt0: str = "crt0_cv32e40p.S"
+    image: str | None = None
+    specializer_dir: Path | None = None
+    encoding: object = None
+    fifo_depth: int | None = None
+    extra_ldflags: list | None = None
+
+    def __call__(self, candidate: SweepCandidate) -> dict[str, float]:
+        """Evaluate one loop mask candidate."""
+        import subprocess as _sp
+
+        from arvis.analysis.hwloop import AsmLoopDetector
+        from arvis.codegen.hwloop.generator import AsmPatcher, HWLoopGenerator
+
+        N = len(self.loop_keys)
+        mask = [int(candidate.overrides.get(f"loop_{i}", 1)) for i in range(N)]
+
+        # Patch assembly with selected loops
+        asm_text = self.src_asm.read_text()
+        det = AsmLoopDetector(str(self.src_asm), fifo_depth=self.fifo_depth)
+        det.find_all_loops()
+
+        enabled = set(self.loop_keys[i] for i, b in enumerate(mask) if b)
+        for loop in det.all_loops:
+            k = (loop.start_label, loop.start_line, loop.back_branch_insn)
+            loop.hw_eligible = k in enabled
+
+        gen = HWLoopGenerator(det, hw_loop=self.hw_loop, encoding=self.encoding)
+        gen.generate()
+        patcher = AsmPatcher(gen, asm_text)
+        patched = patcher.patch()
+
+        # Write temp files
+        tmp_s = self.bm_dir / "_sweep_loop_sel.s"
+        tmp_elf = self.bm_dir / "_sweep_loop_sel.elf"
+        tmp_hex = self.bm_dir / "_sweep_loop_sel.hex"
+        tmp_s.write_text(patched)
+
+        # Assemble
+        if self.image and self.specializer_dir:
+            from arvis.pipeline.hwloop import _assemble_patched
+
+            ok = _assemble_patched(
+                self.specializer_dir,
+                self.bm_dir,
+                tmp_s,
+                "_sweep_loop_sel.elf",
+                "_sweep_loop_sel.hex",
+                image=self.image,
+            )
+            if not ok:
+                return {"cycles": 0.0, "passed": 0.0}
+        else:
+            ret = _sp.call(
+                [
+                    "riscv32-unknown-elf-gcc",
+                    "-march=rv32imc_zicsr",
+                    "-mabi=ilp32",
+                    "-static",
+                    "-nostdlib",
+                    "-nostartfiles",
+                    "-T",
+                    self.link_script,
+                    "-Wl,--gc-sections",
+                    "-o",
+                    str(tmp_elf),
+                    self.crt0,
+                    str(tmp_s),
+                    *(self.extra_ldflags or []),
+                ],
+                timeout=30,
+                cwd=str(self.bm_dir),
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+            )
+            if ret != 0:
+                return {"cycles": 0.0, "passed": 0.0}
+            _sp.call(
+                [
+                    "riscv32-unknown-elf-objcopy",
+                    "-O",
+                    "verilog",
+                    str(tmp_elf),
+                    str(tmp_hex),
+                ],
+                timeout=10,
+                cwd=str(self.bm_dir),
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+            )
+
+        # Simulate
+        try:
+            result = _sp.run(
+                [self.sim_bin, f"+firmware={tmp_hex}", "+maxcycles=20000000"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (_sp.TimeoutExpired, FileNotFoundError):
+            return {"cycles": 0.0, "passed": 0.0}
+
+        for line in result.stdout.splitlines():
+            if "SUCCESS" in line:
+                import re as _re
+
+                m = _re.search(r"after (\d+) cycles", line)
+                if m:
+                    return {"cycles": float(m.group(1)), "passed": 1.0}
+
+        return {"cycles": 0.0, "passed": 0.0}
+
+
 __all__ = [
     "HWLoopDepthEvaluator",
     "HWLoopVariantEvaluator",
+    "LoopSelectionEvaluator",
     "PrefetchFIFOEvaluator",
 ]

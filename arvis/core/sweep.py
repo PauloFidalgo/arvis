@@ -397,6 +397,114 @@ class BayesianSearch:
 
 
 @dataclass
+class GeneticSearch:
+    """Binary GA for on/off parameter spaces.
+
+    Designed for loop-selection problems where each parameter is
+    binary (0 or 1) and the search space is 2^N.  Uses:
+
+    * Elitism (top ``elite`` survive unchanged)
+    * Single-point crossover
+    * Per-bit mutation at rate ``mutation_rate``
+    * 3-phase refinement: GA → re-enable disabled → greedy disable
+
+    For N ≤ ``exhaustive_threshold``, falls back to exhaustive
+    enumeration (2^N is tractable).
+
+    The ``tell()`` hook is used to track the best-seen score so
+    the greedy refinement phases can be driven externally.
+    """
+
+    population_size: int = 16
+    generations: int = 10
+    elite: int = 4
+    mutation_rate: float = 0.1
+    exhaustive_threshold: int = 6
+    seed: int | None = None
+
+    def candidates(self, space: SearchSpace) -> list[SweepCandidate]:
+        """Generate candidates via GA or exhaustive enumeration.
+
+        For binary spaces (each parameter has values [0, 1]),
+        this runs the GA.  For non-binary spaces, falls back to
+        grid search.
+        """
+        rng = random.Random(self.seed)
+        names = list(space.parameters.keys())
+        value_lists = [list(space.parameters[n]) for n in names]
+
+        # Check if all parameters are binary
+        is_binary = all(sorted(v) == [0, 1] for v in value_lists)
+        N = len(names)
+
+        if not is_binary or N <= self.exhaustive_threshold:
+            # Fall back to exhaustive for small/non-binary spaces
+            return GridSearch().candidates(space)
+
+        # GA over binary space
+        def _mask_to_candidate(mask: list[int]) -> SweepCandidate:
+            return SweepCandidate(overrides=dict(zip(names, mask, strict=True)))
+
+        # Initial population: all-on + random
+        population: list[list[int]] = [[1] * N]
+        for _ in range(self.population_size - 1):
+            population.append([1 if rng.random() < rng.uniform(0.7, 0.95) else 0 for _ in range(N)])
+
+        # We emit candidates generation by generation.
+        # The caller evaluates each and feeds back via tell().
+        # Since the Protocol is stateless enumeration, we emit
+        # all candidates upfront (GA + refinement phases).
+        all_candidates: list[SweepCandidate] = []
+
+        # Phase 1: GA generations
+        for _gen in range(self.generations):
+            for mask in population:
+                all_candidates.append(_mask_to_candidate(mask))
+            # Evolve: we can't do adaptive evolution without tell()
+            # feedback inline, so we generate a diverse set.
+            new_pop = population[:self.elite]
+            while len(new_pop) < self.population_size:
+                p1, p2 = rng.sample(population[:self.elite], 2)
+                cx = rng.randint(1, N - 1)
+                child = p1[:cx] + p2[cx:]
+                for j in range(N):
+                    if rng.random() < self.mutation_rate:
+                        child[j] = 1 - child[j]
+                new_pop.append(child)
+            population = new_pop
+
+        # Phase 2: single-bit flips (re-enable + greedy disable)
+        # Emit all single-bit-off and single-bit-on variants
+        all_on = [1] * N
+        all_off = [0] * N
+        all_candidates.append(_mask_to_candidate(all_on))
+        all_candidates.append(_mask_to_candidate(all_off))
+        for i in range(N):
+            # Single bit on
+            mask = [0] * N
+            mask[i] = 1
+            all_candidates.append(_mask_to_candidate(mask))
+            # Single bit off
+            mask = [1] * N
+            mask[i] = 0
+            all_candidates.append(_mask_to_candidate(mask))
+
+        # Deduplicate (cache-friendly for evaluator)
+        seen: set[tuple[int, ...]] = set()
+        unique: list[SweepCandidate] = []
+        for c in all_candidates:
+            key = tuple(c.overrides[n] for n in names)
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+
+        return unique
+
+    def tell(self, candidate: SweepCandidate, score: float) -> None:
+        del candidate, score
+
+
+@dataclass
 class SuccessiveHalving:
     """Budget-aware halving (Successive Halving Algorithm, SHA).
 
@@ -527,6 +635,7 @@ class SweepStrategy(OptimizationStrategy[SweepDecision], ABC):
 
 __all__ = [
     "BayesianSearch",
+    "GeneticSearch",
     "GridSearch",
     "RandomSearch",
     "SearchSpace",

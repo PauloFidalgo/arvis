@@ -324,6 +324,8 @@ def main():
     print_metric("Phases", ", ".join(sorted(cfg.enabled_phases)))
     print_metric("RF read port C", "PRUNE" if cfg.prune_rf_read_c else "KEEP")
     print_metric("RF write port B", "PRUNE" if cfg.prune_rf_write_b else "KEEP")
+    if cfg.use_pipeline_runner:
+        print_metric("Verification mode", "Pipeline.run_full_verification (Phase 7)")
     print()
 
     # ── Prerequisites (toolchain, build, trace) ──

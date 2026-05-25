@@ -413,3 +413,49 @@ class Pipeline:
         from pathlib import Path
 
         return Path(f"output/{workload.name}_specialized")
+
+    # ── Full verification ──────────────────────────────────────────
+    def run_full_verification(self, workload: Workload) -> PipelineResult:
+        """Run the target's standard variants through the pipeline.
+
+        Convenience method that ensures :attr:`variants` contains
+        the canonical set advertised by the target's
+        :attr:`TargetCore.standard_variants` and delegates to
+        :meth:`run`.  For cv32e40p that's the 5 standard variants
+        (baseline, pruned, fused_pruned, hwloop_pruned, all);
+        other targets advertise their own set.
+
+        This replaces the legacy ``runner.run_pipeline`` if-tree
+        that branched on ``has_fusion`` / ``has_hwloop``.  The
+        unified path runs strategies once, then emits each variant
+        with its relevant decision subset.
+
+        Returns
+        -------
+        PipelineResult
+            With one :class:`VariantResult` entry per advertised
+            standard variant.  Variants whose patches raise are
+            recorded in ``result.extra["variant_errors"]`` and
+            skipped gracefully.
+
+        Raises
+        ------
+        ValueError
+            When the target advertises no standard variants
+            (``standard_variants`` returns an empty tuple).
+            Override :attr:`TargetCore.standard_variants` on the
+            target to fix.
+        """
+        std = self.target.standard_variants
+        if not std:
+            raise ValueError(
+                f"Target {self.target.name!r} advertises no standard variants; "
+                "override TargetCore.standard_variants to enable run_full_verification()."
+            )
+
+        saved = self.variants
+        self.variants = list(std)
+        try:
+            return self.run(workload)
+        finally:
+            self.variants = saved

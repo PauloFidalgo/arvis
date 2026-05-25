@@ -65,7 +65,7 @@ deferred).
 | Abstract `SynthesisFlow` + concrete | ✓ | `core/synthesis.py` + `synthesis/yosys_flow.py:YosysSynthesisFlow` |
 | Abstract `Reporter` + concrete | ✓ | `core/reporter.py` + `report/markdown_reporter.py:MarkdownReporter` |
 | Abstract `Toolchain` | ✓ | `core/toolchain.py` |
-| Concrete `Toolchain` impl | partial | `pipeline/gcc_compile.py:run` exists; not yet wrapped as `RISCVGCCToolchain` |
+| Concrete `Toolchain` impl | ✓ | `toolchains/riscv_gcc.py:RISCVGCCToolchain` wraps GCC + objdump; compile/assemble/disassemble verified |
 | Generalised hyperparameter sweep | ✓ | `core/sweep.py` (4 search strategies, 3 concrete sweeps) |
 | Pydantic JSON serialisation | ✓ | `Decision` + `SweepResult` + `SweepDecision` round-trip |
 
@@ -125,19 +125,30 @@ deferred).
 * **Full `runner.py` replacement.**  `_run_verification`'s
   five-step orchestration still uses the legacy if-tree.  The
   Phase 6 gateway routes the HW_LOOP per-candidate sim+synth
-  through the new path; the wholesale replacement requires a
-  concrete `RISCVGCCToolchain` for the dual-compile, which is
-  Phase 6.6/6.7 territory.
+  through the new path; `Pipeline.run_full_verification()` now
+  drives all 5 standard variants through the unified path with
+  `RISCVGCCToolchain` available (Phase 6.7 complete).  Phase 7
+  adds the top-level gateway: when ``--use-pipeline-runner`` is
+  set, ``run_pipeline`` routes the entire verification step
+  (legacy ``_run_verification``) through
+  ``_run_verification_via_pipeline`` which uses
+  ``Pipeline.run_full_verification``.  Binary generation
+  (analysis, fusion, hwloop, pruning) still runs through the
+  legacy code because it requires Docker GCC + assembly
+  patching.
 
 * **Legacy `pipeline/runner.py` mypy errors (19).**  Pre-existing
   type drift around `pipeline.verification.run_post_pruning_check`
   and `ctx` attribute access.  Fix is part of the wholesale
   runner replacement.
 
-* **GA / exhaustive HW_LOOP selection.**  The `--ga` flag's
-  branch in `_run_verification` (lines 660-790) doesn't route
-  through the new sweep framework.  Migration is straightforward
-  but blocked on the runner replacement.
+* **GA / exhaustive HW_LOOP selection** (Phase 6.7+ complete).
+  Migrated to the sweep framework via :class:`GeneticSearch`
+  (binary GA), :class:`LoopSelectionSweep`, and
+  :class:`LoopSelectionEvaluator`.  Routes through
+  ``_loop_selection_via_sweep`` when ``--use-pipeline-runner``
+  is set; the legacy GA path stays available as fallback.
+  See ``tests/portability/test_loop_selection_sweep.py``.
 
 These gaps are tracked but not blockers for the current
 production-grade quality baseline.

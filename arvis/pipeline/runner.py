@@ -67,17 +67,33 @@ def run_pipeline(cfg: ToolConfig, ctx: PipelineContext) -> None:
 
     # ── Verification ──
     if "pruning" in cfg.enabled_phases:
-        _run_verification(
-            cfg,
-            ctx,
-            changeset,
-            prune_config_orig,
-            all_used_orig,
-            prune_config_hwonly=prune_config_hwonly,
-            all_used_hwonly=all_used_hwonly,
-            fused_only_hex=fused_only_hex,
-            fused_only_elf=fused_only_elf,
-        )
+        # Phase 7 gateway: when --use-pipeline-runner is set, route the
+        # 5-variant emission + sim + synth through Pipeline.run_full_verification
+        # instead of the legacy _run_verification if-tree.
+        if cfg.use_pipeline_runner:
+            _run_verification_via_pipeline(
+                cfg,
+                ctx,
+                changeset,
+                prune_config_orig,
+                all_used_orig,
+                prune_config_hwonly=prune_config_hwonly,
+                all_used_hwonly=all_used_hwonly,
+                fused_only_hex=fused_only_hex,
+                fused_only_elf=fused_only_elf,
+            )
+        else:
+            _run_verification(
+                cfg,
+                ctx,
+                changeset,
+                prune_config_orig,
+                all_used_orig,
+                prune_config_hwonly=prune_config_hwonly,
+                all_used_hwonly=all_used_hwonly,
+                fused_only_hex=fused_only_hex,
+                fused_only_elf=fused_only_elf,
+            )
 
     # ── HTML Report ──
     from arvis.cli import print_success
@@ -357,6 +373,283 @@ def _run_pruning(cfg: ToolConfig, ctx: PipelineContext, changeset) -> tuple:
         prune_config_orig, all_used_orig = compute_prune_config(cfg, ctx)
         changeset.add_prune_config(prune_config_orig, all_used_orig)
         return prune_config_orig, all_used_orig, prune_config_orig, all_used_orig
+
+
+def _loop_selection_via_sweep(
+    *,
+    cfg,
+    ctx,
+    bm_dir: Path,
+    prog_name: str,
+    hw_val: int,
+    rtl_all: str,
+    label_tag: str,
+    encoding,
+    image: str | None,
+    specializer_dir: Path,
+    fifo_depth: int,
+    build_sim_fn,
+) -> bool:
+    """Run per-loop selection via the LoopSelectionSweep framework.
+
+    Returns True if the sweep produced a result and updated ctx;
+    False if it couldn't run (caller falls through to legacy GA).
+    """
+    from arvis.analysis.hwloop import AsmLoopDetector
+    from arvis.cli import print_info, print_section
+    from arvis.pipeline.hwloop import _assemble_patched
+    from arvis.strategies.sweep.loop_selection import LoopSelectionSweep
+    from arvis.targets.cv32e40p.sweep_evaluators import LoopSelectionEvaluator
+
+    tag = label_tag.replace(" ", "_").lower()
+    best_hex: str | None = None
+    best_elf: str | None = None
+    best_cycles = float("inf")
+
+    for variant, src_name in [
+        ("nounroll", f"{prog_name}_merged.s"),
+        ("unroll", f"{prog_name}_merged_unroll.s"),
+    ]:
+        fused_src = bm_dir / src_name
+        if not fused_src.exists():
+            continue
+
+        print_section(f"LOOP SELECTION SWEEP — All ({label_tag}, {variant})")
+
+        # Build sim binary from the sweep RTL
+        sim_bin = build_sim_fn(rtl_all, f"sweep_sel_{tag}_{variant}")
+        if not sim_bin:
+            continue
+
+        # Detect eligible loops
+        det = AsmLoopDetector(str(fused_src), fifo_depth=fifo_depth)
+        det.find_all_loops()
+
+        # Apply cached valid_loops filter if available
+        _cand_for_variant = None
+        for _c in ctx.hwloop_candidates:
+            if getattr(_c, "fused_src", None) == str(fused_src):
+                _cand_for_variant = _c
+                break
+        _cached_valid = (
+            getattr(_cand_for_variant, "_valid_loops", None) if _cand_for_variant else None
+        )
+        if _cached_valid is not None:
+            for loop in det.all_loops:
+                k = (loop.start_label, loop.start_line, loop.back_branch_insn)
+                if k not in _cached_valid:
+                    loop.hw_eligible = False
+
+        eligible = [loop for loop in det.all_loops if loop.hw_eligible]
+        if not eligible:
+            continue
+
+        loop_keys = [(loop.start_label, loop.start_line, loop.back_branch_insn) for loop in eligible]
+        N = len(loop_keys)
+        print_info(f"  {N} eligible loops → sweep via {'exhaustive' if N <= 6 else 'GA'}")
+
+        # Build evaluator and sweep
+        evaluator = LoopSelectionEvaluator(
+            src_asm=fused_src,
+            loop_keys=loop_keys,
+            hw_loop=hw_val,
+            bm_dir=bm_dir,
+            sim_bin=sim_bin,
+            image=image,
+            specializer_dir=specializer_dir,
+            encoding=encoding,
+            fifo_depth=fifo_depth,
+        )
+        sweep = LoopSelectionSweep(
+            loop_keys=[str(k) for k in loop_keys],
+            evaluator=evaluator,
+        )
+
+        # Run the sweep (analyze ignores workload/profile/target for sweeps)
+        decision = sweep.analyze(None, None, None)  # type: ignore[arg-type]
+
+        if decision.best is None:
+            print_info(f"  Sweep found no passing candidates for {variant}")
+            continue
+
+        sweep_cycles = decision.best.metrics.get("cycles", float("inf"))
+        mask = sweep.best_mask(decision)
+        n_on = sum(mask)
+        print_info(
+            f"  ✓ Sweep result: {int(sweep_cycles):,} cycles "
+            f"({n_on}/{N} loops, {len(decision.all_results)} evals)"
+        )
+
+        if sweep_cycles < best_cycles:
+            # Build the final patched assembly with the winning mask
+            from arvis.codegen.hwloop.generator import AsmPatcher, HWLoopGenerator
+
+            asm_text = fused_src.read_text()
+            det_final = AsmLoopDetector(str(fused_src), fifo_depth=fifo_depth)
+            det_final.find_all_loops()
+            enabled_keys = set(loop_keys[i] for i in range(N) if mask[i])
+            for loop in det_final.all_loops:
+                k = (loop.start_label, loop.start_line, loop.back_branch_insn)
+                loop.hw_eligible = k in enabled_keys
+            gen = HWLoopGenerator(det_final, hw_loop=hw_val, encoding=encoding)
+            gen.generate()
+            patcher = AsmPatcher(gen, asm_text)
+            patched_path = bm_dir / f"{prog_name}_hw{hw_val}_sweep_sel_{tag}_{variant}.s"
+            patched_path.write_text(patcher.patch())
+
+            sel_elf = f"{prog_name}_hw{hw_val}_sweep_sel_{tag}_{variant}.elf"
+            sel_hex = f"{prog_name}_hw{hw_val}_sweep_sel_{tag}_{variant}.hex"
+            ok = _assemble_patched(specializer_dir, bm_dir, patched_path, sel_elf, sel_hex, image=image)
+            if ok:
+                best_cycles = sweep_cycles
+                best_hex = str(bm_dir / sel_hex)
+                best_elf = str(bm_dir / sel_elf)
+                print_info(f"  ✓ {variant}: {int(best_cycles):,} cycles ← new best")
+
+    if best_hex:
+        ctx.hwloop_hex_path = best_hex
+        ctx.hwloop_elf_path = best_elf
+        ctx.fused_hex_path = best_hex
+        ctx.fused_elf_path = best_elf
+        return True
+
+    return False
+
+
+def _run_verification_via_pipeline(
+    cfg: ToolConfig,
+    ctx: PipelineContext,
+    changeset,
+    prune_config_orig,
+    all_used_orig: set,
+    *,
+    prune_config_hwonly=None,
+    all_used_hwonly: set | None = None,
+    fused_only_hex: str | None = None,
+    fused_only_elf: str | None = None,
+) -> None:
+    """Phase 7 entry: run the 5-variant verification via Pipeline.run_full_verification.
+
+    Replaces the legacy :func:`_run_verification` if-tree with the
+    unified portable path.  Binary-gen phases (analysis / fusion /
+    hwloop / pruning) still run upstream in the legacy code; this
+    function consumes their pre-built hex files via
+    :class:`BenchmarkWorkload.hex_for_variant`.
+
+    The Pipeline is built fresh per call from:
+
+    * The :class:`CV32E40P` target (carries ``standard_variants``).
+    * The same strategy set as the legacy path: fusion, hwloop,
+      pruning, width.  Strategies are constructed in-place from
+      whatever state the binary-gen phases left in ``ctx`` /
+      ``changeset``.
+    * The current concrete :class:`VerilatorVerifier` and
+      :class:`YosysSynthesisFlow` (skipped when their tools are
+      unavailable).
+    * The :class:`MarkdownReporter` for the ``report.md`` artifact.
+
+    The legacy ``runner.py`` HTML reporter still runs after this
+    function returns; the markdown report is an additional
+    artifact produced by the new path.
+
+    Args:
+        Same as :func:`_run_verification`.
+
+    Side effects:
+        Writes ``rtl_<variant>/`` directories under
+        ``cfg.output_dir`` and a ``report.md`` summarising
+        sim/synth results.  Mutates ``ctx`` to record the
+        per-variant results so the legacy HTML reporter can pick
+        them up.
+    """
+    from arvis.cli import print_section, print_success
+    from arvis.core.pipeline import Pipeline
+    from arvis.report.markdown_reporter import MarkdownReporter
+    from arvis.simulation.verifier import VerilatorVerifier
+    from arvis.strategies.fusion import NGramFusion
+    from arvis.strategies.hwloop import CV32E40PHWLoop
+    from arvis.strategies.pruning import UsageDrivenPruner
+    from arvis.strategies.width import PCWidthNarrowing
+    from arvis.synthesis.yosys_flow import YosysSynthesisFlow
+    from arvis.targets import CV32E40P
+    from arvis.toolchains import RISCVGCCToolchain, ToolchainError
+    from arvis.workloads.benchmark import BenchmarkWorkload
+
+    print_section("VERIFICATION via Pipeline.run_full_verification (Phase 7)")
+
+    # Build the workload pointing at the pre-populated bench dir.
+    workload = BenchmarkWorkload(bench_dir=Path(cfg.benchmark_dir))
+
+    # Target carries standard_variants so Pipeline drives the
+    # canonical 5-variant set.
+    target = CV32E40P()
+
+    # Toolchain is best-effort: when GCC isn't installed (CI
+    # without RISC-V toolchain), fall back to a null toolchain so
+    # construction doesn't fail.
+    try:
+        toolchain = RISCVGCCToolchain()
+    except ToolchainError:
+        from arvis.core.toolchain import CompiledArtifact, Toolchain
+        from arvis.core.isa import ISADescriptor
+
+        class _NullToolchain(Toolchain):
+            @property
+            def name(self) -> str:
+                return "null"
+
+            @property
+            def isa(self) -> ISADescriptor:
+                return ISADescriptor(name="rv32imc", xlen=32, standard_extensions=("i", "m", "c"))
+
+            def compile(self, *a, **kw):
+                raise NotImplementedError
+
+            def assemble(self, *a, **kw):
+                raise NotImplementedError
+
+            def disassemble(self, elf):
+                return ""
+
+        toolchain = _NullToolchain()
+
+    # Construct strategies; they're cheap to build and the analyze()
+    # calls inside Pipeline.run() short-circuit when applicable() returns
+    # False.
+    strategies = [
+        NGramFusion(),
+        CV32E40PHWLoop(),
+        UsageDrivenPruner(verbose=False),
+        PCWidthNarrowing(),
+    ]
+
+    verifier = VerilatorVerifier(rtl_root=str(target.rtl_root))
+    synthesis = YosysSynthesisFlow()
+    reporter = MarkdownReporter()
+
+    pipeline = Pipeline(
+        target=target,
+        toolchain=toolchain,
+        strategies=strategies,
+        verifier=verifier,
+        synthesis=synthesis,
+        reporter=reporter,
+    )
+    # Redirect output to cfg.output_dir so artifacts land where the
+    # legacy code expects them.
+    out_root = Path(cfg.output_dir)
+    pipeline._output_root_for_workload = lambda wl: out_root  # type: ignore[method-assign]
+
+    result = pipeline.run_full_verification(workload)
+
+    # Stash per-variant results on ctx so the HTML reporter can
+    # pick them up.  Also expose for downstream tools.
+    ctx.pipeline_result = result
+
+    print_success(
+        f"Pipeline.run_full_verification: {len(result.variants)} variants emitted "
+        f"-> {out_root / 'report.md'}"
+    )
 
 
 def _run_verification(
@@ -825,6 +1118,25 @@ def _run_verification(
         )
         hwlp_enc_fused = getattr(ctx, "_hwlp_enc_fused", hwlp_enc)
         hwlp_enc_plain = getattr(ctx, "_hwlp_enc_plain", hwlp_enc)
+
+        # ── Sweep-framework path (Phase 6.7) ──────────────────────
+        if cfg.use_pipeline_runner and has_fusion and has_hl and rtl_all:
+            _result = _loop_selection_via_sweep(
+                cfg=cfg,
+                ctx=ctx,
+                bm_dir=bm_dir,
+                prog_name=prog_name,
+                hw_val=hw_val,
+                rtl_all=rtl_all,
+                label_tag=label_tag,
+                encoding=hwlp_enc_fused,
+                image=FUSED_IMAGE,
+                specializer_dir=specializer_dir,
+                fifo_depth=changeset.prefetch_fifo_depth or 2,
+                build_sim_fn=_build_sim_from_rtl,
+            )
+            if _result:
+                return
 
         # GA optimization on "All" (fused+hwloop+pruned) — uses sweep RTL
         # Run on BOTH nounroll and unroll merged sources, pick best

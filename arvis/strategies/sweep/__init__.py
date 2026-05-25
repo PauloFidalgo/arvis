@@ -16,7 +16,8 @@ search strategy.
 """
 
 from arvis.strategies.sweep.hwloop_depth import HWLoopDepthSweep
+from arvis.strategies.sweep.loop_selection import LoopSelectionSweep
 from arvis.strategies.sweep.multi_param import MultiParamSweep
 from arvis.strategies.sweep.prefetch_fifo import PrefetchFIFOSweep
 
-__all__ = ["HWLoopDepthSweep", "MultiParamSweep", "PrefetchFIFOSweep"]
+__all__ = ["HWLoopDepthSweep", "LoopSelectionSweep", "MultiParamSweep", "PrefetchFIFOSweep"]

@@ -97,14 +97,17 @@ class PipelineContext:
     docker_baseline_elf: Optional[str] = None
 
     # ── Named hex files (unique per step, no overwrites) ──
-    hex_baseline: Optional[str] = None  # Step 1 & 2: baseline + pruned
-    hex_fused: Optional[str] = None  # Step 3: fused+pruned
-    hex_hwloop_pruned: Optional[str] = None  # Step 4: hwloop+pruned (final, beneficial loops only)
-    hex_all: Optional[str] = None  # Step 5: fused+hwloop+pruned (best ADP)
-    hex_all_perf: Optional[str] = None  # Step 5: fused+hwloop+pruned (best cycles)
+    hex_baseline: Optional[str] = None          # Step 1 & 2: baseline + pruned
+    hex_fused: Optional[str] = None             # Step 3: fused+pruned
+    hex_hwloop_pruned: Optional[str] = None     # Step 4: hwloop+pruned (final, beneficial loops only)
+    hex_all: Optional[str] = None               # Step 5: fused+hwloop+pruned (best ADP)
+    hex_all_perf: Optional[str] = None          # Step 5: fused+hwloop+pruned (best cycles)
 
     # HWLoop sweep candidates (produced by hwloop phase, evaluated in verification)
     hwloop_candidates: List = field(default_factory=list)  # List[HWLoopCandidate]
 
     # ── Phase 8: Reporting ──
     report_path: str = ""
+
+    # ── Phase 7: Pipeline.run_full_verification result (when --use-pipeline-runner) ──
+    pipeline_result: object = None
