@@ -418,6 +418,180 @@ def replace_pattern(
     return True
 
 
+# ─── AST_REMOVE_CASE_ITEMS ─────────────────────────────────────────
+
+
+def remove_case_items(
+    workspace: RTLWorkspace,
+    file: str,
+    case_selector: str,
+    removable_labels: object,
+) -> bool:
+    """Remove case-arm items via pyslang AST manipulation.
+
+    Generalises the legacy ``prune_alu_cases`` /
+    ``prune_mult_cases`` / ``prune_csr_cases`` functions.  The
+    primitive:
+
+    1. Parses the SV file via ``pyslang.SyntaxTree.fromText``.
+    2. Walks the AST looking for ``case (case_selector)``
+       statements (matched by the selector expression's text).
+    3. For each ``StandardCaseItem`` where ALL labels are in
+       ``removable_labels``, marks it for removal.
+    4. Applies ``pyslang.rewrite()`` with a handler that calls
+       ``rewriter.remove()`` on marked items.
+    5. Post-processes the resulting text to replace any
+       case-empty blocks (``case (X) endcase``) with a comment
+       so Verilator doesn't warn about ``CaseStatementEmpty``.
+
+    Items with mixed labels (some removable, some used) are
+    KEPT in full — partial-label removal would require splitting
+    items, which the legacy code also doesn't support.
+
+    Parameters
+    ----------
+    workspace:
+        The RTLWorkspace whose ``output_root`` contains ``file``.
+    file:
+        Path relative to ``output_root`` (e.g.
+        ``"rtl/cv32e40p_alu.sv"``).
+    case_selector:
+        Selector signal name (e.g. ``"operator_i"``,
+        ``"csr_addr"``).  Matched as a literal string against
+        the case statement's selector expression.
+    removable_labels:
+        Iterable of label identifiers (e.g.
+        ``{"ALU_BCLR", "ALU_SHUF"}``).  Sets, tuples, lists all
+        accepted; converted to a set internally.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one item was removed and the file
+        was rewritten.  ``False`` on missing pyslang, missing
+        file, no matching case, or no removable items.
+
+    Notes
+    -----
+    pyslang is an optional dependency.  When unavailable, this
+    primitive logs a warning and returns ``False``; the
+    feature's other actions still apply.
+    """
+    try:
+        import pyslang
+    except ImportError:
+        logger.warning(
+            "remove_case_items: pyslang not installed; skipping AST-based pruning of %s in %s",
+            case_selector,
+            file,
+        )
+        return False
+
+    # pyslang ≥ 11 moved SyntaxTree/SyntaxNode/SyntaxKind/rewrite into
+    # the pyslang.syntax submodule; older versions exposed them at the
+    # top level.  Resolve both transparently.
+    _ps_root = pyslang
+    if not hasattr(_ps_root, "SyntaxTree") and hasattr(_ps_root, "syntax"):
+        _ps_root = _ps_root.syntax
+
+    path = _resolve(workspace, file)
+    if path is None:
+        return False
+
+    removable = (
+        frozenset(removable_labels)
+        if not isinstance(removable_labels, frozenset)
+        else removable_labels
+    )
+    if not removable:
+        logger.debug("remove_case_items: empty removable set for %s", file)
+        return False
+
+    text = path.read_text()
+    tree = _ps_root.SyntaxTree.fromText(text)
+
+    # Walk the AST collecting items to remove.
+    items_to_remove: list[object] = []
+
+    def _visit(node: object) -> None:
+        if not isinstance(node, _ps_root.SyntaxNode):
+            return
+        if node.kind != _ps_root.SyntaxKind.CaseStatement:
+            return
+        if str(node.expr).strip() != case_selector:
+            return
+        for item in node.items:
+            if item.kind != _ps_root.SyntaxKind.StandardCaseItem:
+                continue
+            labels = _extract_case_item_labels(item)
+            if labels and all(label in removable for label in labels):
+                items_to_remove.append(item)
+
+    tree.root.visit(_visit)
+
+    if not items_to_remove:
+        logger.debug(
+            "remove_case_items: no removable items in case (%s) of %s",
+            case_selector,
+            file,
+        )
+        return False
+
+    remove_ids = {id(item) for item in items_to_remove}
+
+    def _handler(node: object, rewriter: object) -> None:
+        if (
+            isinstance(node, _ps_root.SyntaxNode)
+            and node.kind == _ps_root.SyntaxKind.StandardCaseItem
+            and id(node) in remove_ids
+        ):
+            rewriter.remove(node)
+
+    new_tree = _ps_root.rewrite(tree, _handler)
+    result = str(new_tree.root)
+
+    # Post-process: turn an empty case (selector) endcase into a
+    # comment to avoid Verilator's CaseStatementEmpty lint warning.
+    result = re.sub(
+        r"(\n\s*)(?:unique\s+)?case\s*\([^)]+\)\s*\n\s*endcase",
+        r"\1// case pruned: all items removed by feature-based pruning",
+        result,
+    )
+
+    path.write_text(result)
+    logger.info(
+        "remove_case_items: %d arm(s) removed from case (%s) in %s",
+        len(items_to_remove),
+        case_selector,
+        file,
+    )
+    return True
+
+
+def _extract_case_item_labels(item: object) -> list[str]:
+    """Extract label identifiers from a StandardCaseItem AST node.
+
+    Mirrors the legacy ``_extract_label_names`` helper.  Each
+    expression is either an identifier (``ALU_AND``) or a comma
+    separator; we strip whitespace and inline comments and
+    return the bare identifier list.
+    """
+    names: list[str] = []
+    for expr in item.expressions:
+        text = str(expr).strip()
+        if text == ",":
+            continue
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            for part in stripped.split(","):
+                part = part.strip()
+                if part and not part.startswith("//"):
+                    names.append(part)
+    return names
+
+
 # ─── Dispatch table ────────────────────────────────────────────────
 
 
@@ -463,6 +637,11 @@ def dispatch(
         return remove_module_instance(workspace, file, target)
     if kind is ActionKind.REPLACE_PATTERN:
         return replace_pattern(workspace, file, target, str(value or ""))
+    if kind is ActionKind.AST_REMOVE_CASE_ITEMS:
+        if value is None:
+            logger.warning("dispatch: AST_REMOVE_CASE_ITEMS requires value (label set)")
+            return False
+        return remove_case_items(workspace, file, target, value)
 
     logger.error("dispatch: unknown ActionKind %r", kind)
     return False
@@ -470,6 +649,7 @@ def dispatch(
 
 __all__ = [
     "dispatch",
+    "remove_case_items",
     "remove_module_instance",
     "remove_opcode_case",
     "remove_pragma_block",

@@ -321,6 +321,63 @@ _COMPRESSED = CoreFeature(
 """Maps to legacy ``PruneConfig.enable_compressed``."""
 
 
+_PULP_ALU_OPS = CoreFeature(
+    name="pulp_alu_ops",
+    description=(
+        "PULP-specific ALU operations (bit-manipulation, count, "
+        "extract/insert).  Removed via AST-based case-arm pruning "
+        "when COREV_PULP is disabled."
+    ),
+    # The legacy parameter gate (COREV_PULP=0) sets up generate-if
+    # blocks, but the case arms in the ALU still occupy decoder
+    # space.  We strip them via AST.  Tied to the same predicate as
+    # _PULP_EXTENSIONS so they cascade.
+    usage_predicate=lambda p: any(m.startswith(_PULP_PREFIXES) for m in p.instr_histogram),
+    removal_actions=(
+        RemovalAction(
+            kind=ActionKind.AST_REMOVE_CASE_ITEMS,
+            file="rtl/cv32e40p_alu.sv",
+            target="operator_i",
+            value=frozenset(
+                {
+                    # Bit manipulation
+                    "ALU_BCLR",
+                    "ALU_BSET",
+                    "ALU_BEXT",
+                    "ALU_BEXTU",
+                    "ALU_BINS",
+                    "ALU_BREV",
+                    # Count / find
+                    "ALU_FF1",
+                    "ALU_FL1",
+                    "ALU_CLB",
+                    "ALU_CNT",
+                    "ALU_ROR",
+                    # Extract / pack
+                    "ALU_EXTS",
+                    "ALU_EXT",
+                    "ALU_INS",
+                    # SIMD shuffles
+                    "ALU_SHUF",
+                    "ALU_SHUF2",
+                    "ALU_PCKLO",
+                    "ALU_PCKHI",
+                }
+            ),
+        ),
+    ),
+    estimated_area_pct=2.5,
+)
+"""Removes PULP-specific case arms from cv32e40p_alu.sv via AST.
+
+This is the canonical example of AST_REMOVE_CASE_ITEMS in
+action.  The labels are known at definition time (they're a
+fixed set defined by the cv32e40p ALU), so a declarative kind
+fits perfectly — no per-workload computation needed beyond the
+binary "is PULP used?" predicate.
+"""
+
+
 _INTERRUPTS = CoreFeature(
     name="interrupts",
     description="Interrupt path (mtvec, mip, mie, interrupt controller)",
@@ -356,6 +413,7 @@ CV32E40P_FEATURES: tuple[CoreFeature, ...] = (
     _DEBUG,
     _HPM_COUNTERS,
     _PULP_EXTENSIONS,
+    _PULP_ALU_OPS,
     _FPU,
     _REGFILE_PORT_C,
     _REGFILE_PORT_B_WRITE,

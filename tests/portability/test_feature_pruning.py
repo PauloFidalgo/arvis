@@ -190,6 +190,162 @@ class TestShrinkParameter:
         assert shrink_parameter(workspace, "rtl/m.sv", "PC_WIDTH", "foo") is False  # type: ignore[arg-type]
 
 
+class TestRemoveCaseItems:
+    """AST-based case-item removal via pyslang."""
+
+    def test_single_label_removed(self, workspace: _MockWorkspace) -> None:
+        """A simple single-label arm gets removed cleanly."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (operator_i)\n"
+            "      ALU_ADD: result_o = a + b;\n"
+            "      ALU_BCLR: result_o = a & ~b;\n"
+            "      ALU_SUB: result_o = a - b;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        ok = remove_case_items(workspace, "rtl/alu.sv", "operator_i", {"ALU_BCLR"})
+        assert ok is True
+
+        text = (workspace.output_root / "rtl/alu.sv").read_text()
+        assert "ALU_BCLR" not in text
+        assert "ALU_ADD" in text
+        assert "ALU_SUB" in text
+
+    def test_multi_label_mixed_kept(self, workspace: _MockWorkspace) -> None:
+        """Multi-label arm with mixed labels stays — partial removal not supported."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (operator_i)\n"
+            "      ALU_MIN, ALU_MINU, ALU_MAX, ALU_MAXU: result_o = minmax;\n"
+            "      ALU_AND: result_o = a & b;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        # MIN/MINU removable, MAX/MAXU not → arm KEPT in full
+        ok = remove_case_items(workspace, "rtl/alu.sv", "operator_i", {"ALU_MIN", "ALU_MINU"})
+        # No items removed → returns False
+        assert ok is False
+        text = (workspace.output_root / "rtl/alu.sv").read_text()
+        assert "ALU_MIN" in text and "ALU_MAX" in text
+
+    def test_multi_label_all_removable(self, workspace: _MockWorkspace) -> None:
+        """When ALL labels in an arm are removable, the arm is dropped."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (operator_i)\n"
+            "      ALU_MIN, ALU_MAX: result_o = minmax;\n"
+            "      ALU_AND: result_o = a & b;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        ok = remove_case_items(workspace, "rtl/alu.sv", "operator_i", {"ALU_MIN", "ALU_MAX"})
+        assert ok is True
+        text = (workspace.output_root / "rtl/alu.sv").read_text()
+        assert "ALU_MIN" not in text
+        assert "ALU_MAX" not in text
+        assert "ALU_AND" in text
+
+    def test_no_match_when_selector_differs(self, workspace: _MockWorkspace) -> None:
+        """Wrong selector signal name → no removal."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (other_signal)\n"
+            "      ALU_BCLR: result_o = '0;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        ok = remove_case_items(workspace, "rtl/alu.sv", "operator_i", {"ALU_BCLR"})
+        assert ok is False
+        assert "ALU_BCLR" in (workspace.output_root / "rtl/alu.sv").read_text()
+
+    def test_empty_removable_set(self, workspace: _MockWorkspace) -> None:
+        """Empty removable set → no work, returns False."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (op)\n"
+            "      ALU_X: foo = 1;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+        ok = remove_case_items(workspace, "rtl/alu.sv", "op", set())
+        assert ok is False
+
+    def test_missing_file(self, workspace: _MockWorkspace) -> None:
+        """Missing file → False, no exception."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        ok = remove_case_items(workspace, "rtl/nope.sv", "op", {"X"})
+        assert ok is False
+
+    def test_empty_case_block_replaced_with_comment(self, workspace: _MockWorkspace) -> None:
+        """When all arms are removed, the empty case block becomes a comment."""
+        from arvis.core.rtl_primitives import remove_case_items
+
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (operator_i)\n"
+            "      ALU_X: result_o = '0;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        ok = remove_case_items(workspace, "rtl/alu.sv", "operator_i", {"ALU_X"})
+        assert ok is True
+        text = (workspace.output_root / "rtl/alu.sv").read_text()
+        # Empty case block is replaced with a comment to avoid Verilator warnings
+        assert "case pruned" in text
+        assert "endcase" not in text or "// case pruned" in text
+
+    def test_dispatch_routes_correctly(self, workspace: _MockWorkspace) -> None:
+        """ActionKind.AST_REMOVE_CASE_ITEMS reaches the primitive via dispatch()."""
+        (workspace.output_root / "rtl/alu.sv").write_text(
+            "module alu;\n"
+            "  always_comb begin\n"
+            "    case (op)\n"
+            "      ALU_X: foo = 1;\n"
+            "      ALU_Y: foo = 2;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        ok = dispatch(workspace, ActionKind.AST_REMOVE_CASE_ITEMS, "rtl/alu.sv", "op", {"ALU_X"})
+        assert ok is True
+        assert "ALU_X" not in (workspace.output_root / "rtl/alu.sv").read_text()
+
+    def test_dispatch_requires_value(self, workspace: _MockWorkspace) -> None:
+        """AST_REMOVE_CASE_ITEMS without value → False, no crash."""
+        ok = dispatch(workspace, ActionKind.AST_REMOVE_CASE_ITEMS, "rtl/alu.sv", "op", None)
+        assert ok is False
+
+
 class TestRemovePragmaBlock:
     def test_removes_block(self, workspace: _MockWorkspace) -> None:
         (workspace.output_root / "rtl/m.sv").write_text(
@@ -515,6 +671,66 @@ class TestBranchPredictorScenario:
 
 class TestCV32E40PFeatures:
     """The cv32e40p feature surface is well-formed."""
+
+    def test_pulp_alu_ops_uses_ast_kind(self) -> None:
+        """The pulp_alu_ops feature uses AST_REMOVE_CASE_ITEMS."""
+        from arvis.targets.cv32e40p.features import CV32E40P_FEATURES
+
+        feature = next(f for f in CV32E40P_FEATURES if f.name == "pulp_alu_ops")
+        assert len(feature.removal_actions) == 1
+        action = feature.removal_actions[0]
+        assert action.kind == ActionKind.AST_REMOVE_CASE_ITEMS
+        assert action.target == "operator_i"
+        # value carries the label set
+        assert "ALU_BCLR" in action.value
+        assert "ALU_SHUF" in action.value
+
+    def test_pulp_alu_ops_end_to_end(self, workspace: _MockWorkspace) -> None:
+        """When PULP is unused, the AST primitive removes those arms."""
+        # Realistic-ish ALU with PULP and standard arms
+        (workspace.output_root / "rtl/cv32e40p_alu.sv").write_text(
+            "module cv32e40p_alu;\n"
+            "  always_comb begin\n"
+            "    case (operator_i)\n"
+            "      ALU_ADD: result_o = a + b;\n"
+            "      ALU_SUB: result_o = a - b;\n"
+            "      ALU_AND: result_o = a & b;\n"
+            "      ALU_OR:  result_o = a | b;\n"
+            "      ALU_BCLR: result_o = a & ~bclr_mask;\n"
+            "      ALU_BSET: result_o = a | bset_mask;\n"
+            "      ALU_FF1:  result_o = ff1_count;\n"
+            "      ALU_SHUF: result_o = shuf_result;\n"
+            "    endcase\n"
+            "  end\n"
+            "endmodule\n"
+        )
+
+        from arvis.targets.cv32e40p.features import CV32E40P_FEATURES
+
+        # Workload with no PULP ops → pulp_alu_ops is removable
+        profile = WorkloadProfile(instr_histogram={"add": 100, "sub": 50})
+        unused, _ = resolve_removable(CV32E40P_FEATURES, profile)
+        assert "pulp_alu_ops" in unused
+
+        # Build patch and apply
+        from arvis.targets import CV32E40P
+
+        target = CV32E40P()
+        decision = PruneDecision(unused_features=frozenset({"pulp_alu_ops"}))
+        patch = FeatureRemovalPatch(decision=decision, target=target)
+        patch.apply(workspace)  # type: ignore[arg-type]
+
+        # Verify PULP arms removed, standard arms kept
+        text = (workspace.output_root / "rtl/cv32e40p_alu.sv").read_text()
+        assert "ALU_BCLR" not in text
+        assert "ALU_BSET" not in text
+        assert "ALU_FF1" not in text
+        assert "ALU_SHUF" not in text
+        # Standard ALU arms preserved
+        assert "ALU_ADD" in text
+        assert "ALU_SUB" in text
+        assert "ALU_AND" in text
+        assert "ALU_OR" in text
 
     def test_loads_without_error(self) -> None:
         from arvis.targets.cv32e40p.features import CV32E40P_FEATURES

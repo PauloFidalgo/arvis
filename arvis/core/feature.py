@@ -126,6 +126,29 @@ class ActionKind(Enum):
     ``value``  = replacement string.
     """
 
+    AST_REMOVE_CASE_ITEMS = "ast_remove_case_items"
+    """Remove case-arm items via pyslang AST manipulation.
+
+    Generalises the legacy ``codegen/rtl/pyslang_pruning.py``
+    routines (``prune_alu_cases``, ``prune_mult_cases``,
+    ``prune_csr_cases``) into one declarative kind.
+
+    ``target`` = the case-selector signal name (e.g.
+    ``"operator_i"`` for the ALU's ``case (operator_i)``,
+    ``"csr_addr"`` for the CSR mux).
+    ``value``  = iterable of label names to remove (set, tuple,
+    or list).  An item is removed iff ALL its labels are in
+    this set; multi-label items with mixed
+    used/unused labels are kept (partial-label removal would
+    require deeper AST surgery and isn't supported).
+
+    Why AST instead of regex?  Case items are highly variable:
+    single-label, comma-separated multi-label, multi-line
+    begin/end blocks, mixed comments — pyslang parses the
+    structure so removal is precise and won't mangle adjacent
+    arms.
+    """
+
 
 # ─── Action shapes ─────────────────────────────────────────────────
 
